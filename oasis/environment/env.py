@@ -79,8 +79,8 @@ class OasisEnv:
                 self.platform = Platform(
                     db_path=database_path,
                     channel=self.channel,
-                    recsys_type="twhin-bert",
-                    # recsys_type="random",
+                    # recsys_type="twhin-bert",
+                    recsys_type="random",
                     refresh_rec_post_count=2,
                     max_rec_post_len=2,
                     following_post_count=3,

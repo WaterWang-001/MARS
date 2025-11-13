@@ -42,7 +42,7 @@ from oasis.social_platform import Channel, Platform
 from oasis.social_platform.config import Neo4jConfig, UserInfo
 from oasis.social_platform.typing import ActionType, RecsysType
 from oasis.social_agent.agent_graph import AgentGraph
-# --- 【!! 关键: 定义你的 4+1 架构 !!】 ---
+from oasis.social_agent.agent_action import SocialAction
 
 # Tier 1: "重" LLM Agents (初始化慢, 运行慢)
 TIER_1_LLM_GROUPS = {
@@ -100,9 +100,133 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df['user_char'] = df['user_char'].fillna('')
     df['description'] = df['description'].fillna('')
     df['following_agentid_list'] = df['following_agentid_list'].fillna('[]')
-    
         
     return df
+def _load_initial_posts_from_db(db_path: str) -> dict[str, List[tuple[Optional[str], Optional[str]]]]:
+    logger = logging.getLogger("agents_generator")
+    logger.info(f"(Graph Build) 正在从 {db_path} 的 'post' 表预加载所有初始帖子...")
+    
+    # { "user_id_str": [ (content1, quote1), (content2, quote2) ], ... }
+    initial_posts_map = defaultdict(list)
+    
+    try:
+        # 使用只读模式 (mode=ro) 连接, 更安全
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        
+        # 【!! 关键修改: SELECT content 和 quote_content !!】
+        cur.execute(
+            "SELECT user_id, content, quote_content FROM post ORDER BY created_at"
+        )
+        
+        count = 0
+        for row in cur:
+            # 确保 user_id 是 str, 以匹配 agent_info 中的 str
+            user_id_str = str(row['user_id']) 
+            
+            # 【!! 关键修改: 存储元组 (content, quote_content) !!】
+            initial_posts_map[user_id_str].append(
+                (row['content'], row['quote_content'])
+            )
+            count += 1
+        
+        cur.close()
+        conn.close()
+        
+        logger.info(f"(Graph Build) 成功从数据库加载 {count} 条初始帖子, "
+                    f"分布在 {len(initial_posts_map)} 个用户中。")
+        return initial_posts_map
+        
+    except sqlite3.Error as e:
+        logger.error(f"❌ (Graph Build) 无法从 {db_path} 读取 'post' 表: {e}")
+        logger.error("   将继续执行, 但所有 agent 的 memory 都会是空的。")
+        return initial_posts_map # 返回空字典
+    except Exception as e:
+         logger.error(f"❌ (Graph Build) _load_initial_posts_from_db 发生意外错误: {e}")
+         return initial_posts_map
+    
+def _preload_agent_memory(
+    agent: BaseAgent, 
+    initial_posts: List[tuple[Optional[str], Optional[str]]] 
+):
+    """
+    (【!! 已修复 !!】)
+    将初始帖子列表 (来自数据库) 作为 "post" 动作写入 agent 的 memory。
+    现在会正确处理 'content' 和 'quote_content'。
+    """
+    logger = logging.getLogger("agents_generator")
+    
+    if not initial_posts: # 检查列表是否为空
+        return
+
+    try:
+        post_count = 0
+        
+        # 【!! 关键修改: 迭代元组 !!】
+        for post_tuple in initial_posts:
+            user_comment_raw, original_post_raw = post_tuple
+            
+            # (进行基本清理, 处理 None 和 bytes)
+            user_comment = ""
+            if isinstance(user_comment_raw, bytes):
+                user_comment = user_comment_raw.decode('utf-8', 'replace').strip()
+            elif isinstance(user_comment_raw, str):
+                user_comment = user_comment_raw.strip()
+                
+            original_post = ""
+            if isinstance(original_post_raw, bytes):
+                original_post = original_post_raw.decode('utf-8', 'replace').strip()
+            elif isinstance(original_post_raw, str):
+                original_post = original_post_raw.strip()
+
+        
+            text_to_load_in_memory = ""
+            if user_comment:
+                text_to_load_in_memory = f"[用户评论]\n{user_comment}"
+                if original_post:
+                    text_to_load_in_memory += f"\n\n[转发的原帖]\n{original_post}"
+            elif original_post:
+                text_to_load_in_memory = f"[转发的原帖]\n{original_post}"
+            else:
+                continue # 如果 content 和 quote_content 都为空, 则跳过
+
+            # 格式化为 LLM 动作输出 (模仿 "post" 动作)
+            action_content = json.dumps({
+                "reason": "This is an initial post from my history.",
+                "functions": [
+                    {
+                        "name": "post",
+                        "arguments": {
+                            "content": text_to_load_in_memory
+                        }
+                    }
+                ]
+            })
+            
+            
+            # 2. 创建一个 'user' 消息, 但 role_name 是 'system'
+            #    (这模仿了 OASIS 记录动作的方式)
+            agent_msg = BaseMessage.make_user_message(
+                role_name=OpenAIBackendRole.ASSISTANT.value, # "system"
+                content=action_content
+            )
+            
+            # 3. 将其作为 SYSTEM 角色写入 Memory
+            #    (这对应于 to_openai_system_message())
+            agent.memory.write_record(
+                MemoryRecord(message=agent_msg, 
+                             role_at_backend=OpenAIBackendRole.ASSISTANT)
+            )
+            post_count += 1
+        
+        if post_count > 0:
+            logger.debug(f"(Graph Build) 成功为 Agent {agent.agent_id} "
+                         f"预加载了 {post_count} 条帖子到 Memory。")
+    
+    except Exception as e:
+        logger.error(f"❌ (Graph Build) 预加载 Memory 失败 for agent "
+                     f"{agent.agent_id}: {e}")
 
 async def generate_agents(
     agent_info_path: str,
@@ -528,30 +652,36 @@ async def generate_custom_agents(
     agent_graph: AgentGraph | None = None,
 ) -> AgentGraph:
     """
-    (【!! 关键重构 !!】)
     这个函数现在是 env.reset() 的一部分。
     它 *假定* agent_graph 已经由 generate_twitter_agent_graph() 填充了。
     它 *只* 负责将这个图注册到数据库中。
     """
     logger = logging.getLogger("agents_generator")
     
+
+    ATTITUDE_COLUMNS = [
+        'attitude_lifestyle_culture',
+        'attitude_sport_ent',
+        'attitude_sci_health',
+        'attitude_politics_econ',
+        'initial_attitude_avg'  # <-- 【!! 在此添加新列 !!】
+    ]
+    
+    
     if agent_graph is None:
         agent_graph = AgentGraph()
     
-
     channel = platform.channel
-
     agent_graph = connect_platform_channel(channel=channel,
                                            agent_graph=agent_graph)
     
     logger.info("... (generate_custom_agents) 正在准备批量注册用户到数据库 ...")
     
+    # ... (计算 followings_map 和 followers_map 的代码保持不变) ...
     logger.info("... (generate_custom_agents) 正在预计算关注数/粉丝数 ...")
     followings_map = defaultdict(set) 
     followers_map = defaultdict(set)
-    
     all_agent_ids = set(aid for aid, _ in agent_graph.get_agents())
-
     for agent_id, agent in agent_graph.get_agents():
         follow_str = agent.user_info.profile["other_info"].get(
             "following_agentid_list_str", "[]"
@@ -561,8 +691,8 @@ async def generate_custom_agents(
             if followee_id in all_agent_ids:
                 followings_map[agent_id].add(followee_id)
                 followers_map[followee_id].add(agent_id)
-    
     logger.info(f"... (generate_custom_agents) 关注图构建完成。{len(followings_map)} 个用户有关注列表。")
+
     
     sign_up_list = []
     follow_list = []
@@ -571,13 +701,21 @@ async def generate_custom_agents(
         
         user_name = agent.user_info.user_name
         name = agent.user_info.name
-        bio = agent.user_info.description # (已清洗)
-        user_id = agent.user_info.profile["other_info"].get("original_user_id") # (已清洗)
+        bio = agent.user_info.description
+        
+        profile_info = agent.user_info.profile["other_info"]
+        user_id = profile_info.get("original_user_id") 
             
         current_time = datetime.now()
             
         num_followings = len(followings_map.get(agent_id, set()))
         num_followers = len(followers_map.get(agent_id, set()))
+        
+        # (此代码不变)
+        # 它现在会自动从 ATTITUDE_COLUMNS 列表中查找 5 个分数
+        att_scores_tuple = tuple(
+            profile_info.get(col, 0.0) for col in ATTITUDE_COLUMNS
+        )
 
         sign_up_list.append((
             user_id,        # (str)
@@ -588,25 +726,31 @@ async def generate_custom_agents(
             current_time,   # (datetime)
             num_followings, # (int)
             num_followers,  # (int)
-        ))
+        ) + att_scores_tuple) # (此元组现在包含 5 个分数)
         
+        # ... (follow_list.append 的代码保持不变) ...
         following_id_list = followings_map.get(agent_id, set())
         for follow_id in following_id_list:
             follow_list.append((agent_id, follow_id, current_time))
-            # (在 graph_build 步骤中已添加)
-            # agent_graph.add_edge(agent_id, follow_id) 
     
+    # (此代码不变)
+    # 它现在会自动构建包含 5 个列名和 5 个 '?' 的 SQL
+    attitude_cols_sql = ", ".join(ATTITUDE_COLUMNS)
+    attitude_placeholders = ", ".join(["?" for _ in ATTITUDE_COLUMNS])
+
     user_insert_query = (
-        "INSERT OR IGNORE INTO user (user_id, agent_id, user_name, name, bio, "
-        "created_at, num_followings, num_followers) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?)")
+        f"INSERT OR IGNORE INTO user (user_id, agent_id, user_name, name, bio, "
+        f"created_at, num_followings, num_followers, {attitude_cols_sql}) VALUES "
+        f"(?, ?, ?, ?, ?, ?, ?, ?, {attitude_placeholders})"
+    )
     
     platform.pl_utils._execute_many_db_command(user_insert_query,
                                                sign_up_list,
                                                commit=True)
     
-    logger.info(f"... (generate_custom_agents) 成功注册 {len(sign_up_list)} 个用户。")
+    logger.info(f"... (generate_custom_agents) 成功注册 {len(sign_up_list)} 个用户 (包含 Attitude)。")
     
+    # ... (follow_insert_query 和 platform.pl_utils 保持不变) ...
     follow_insert_query = (
         "INSERT OR IGNORE INTO follow (follower_id, followee_id, created_at) "
         "VALUES (?, ?, ?)")
@@ -615,7 +759,6 @@ async def generate_custom_agents(
                                               commit=True)
     logger.info(f"... (generate_custom_agents) 成功插入 {len(follow_list)} 条关注关系。")
     
-    # 【!! 修正 (User 63): 移除 post 插入 !!】
     logger.info("... (generate_custom_agents) 已跳过 post 插入 (假设数据库已由 init_post_tables.py 填充)。")
     
     return agent_graph
@@ -662,6 +805,7 @@ async def generate_reddit_agent_graph(
 
 async def generate_twitter_agent_graph(
     profile_path: str,
+    db_path: str,  
     model: Optional[Union[BaseModelBackend, List[BaseModelBackend],
                           ModelManager]] = None,
     available_actions: list[ActionType] = None,
@@ -669,11 +813,12 @@ async def generate_twitter_agent_graph(
     
     logger = logging.getLogger("agents_generator")
     
-    # 【!! 关键修正: 这个函数现在是*主要*的 Agent 创建函数 !!】
+    
+    initial_posts_map = _load_initial_posts_from_db(db_path)
     
     agent_graph = AgentGraph()
     
-    # --- 1. 加载并拆分所有用户 ---
+    # --- 1. 加载并拆分所有用户 (逻辑不变) ---
     logger.info(f"(Graph Build) 正在从 {profile_path} 加载并清洗所有用户数据...")
     try:
         all_user_info = pd.read_csv(profile_path, index_col=0, dtype={'user_id': str})
@@ -688,15 +833,16 @@ async def generate_twitter_agent_graph(
 
     tier1_info = all_user_info[all_user_info['group'].isin(TIER_1_LLM_GROUPS)]
     tier2_info = all_user_info[all_user_info['group'].isin(TIER_2_HEURISTIC_GROUPS)]
-    # (Tier 3 '潜水用户' 将被忽略, 不会创建 agent 对象)
     
     logger.info(f"(Graph Build) 数据加载完毕: {len(tier1_info)} 个 [Tier 1 LLM Agents], {len(tier2_info)} 个 [Tier 2 ABM Agents]")
     
     # --- 2. 遍历并创建数据 (分两步) ---
     
-    # 步骤 A: 遍历 Heuristic Agents (Tier 2) (轻量级 Init, 极快)
+ # 步骤 A: 遍历 Heuristic Agents (Tier 2)
     logger.info(f"(Graph Build) 正在为 {len(tier2_info)} 个 Heuristic Agents (Tier 2) 创建对象...")
     for agent_id, row in tqdm.tqdm(tier2_info.iterrows(), total=len(tier2_info), desc="Building Heuristic Agents"):
+        
+        
         user_name = row["username"]
         name = row["name"]
         bio = row["description"]
@@ -710,7 +856,12 @@ async def generate_twitter_agent_graph(
                 "user_profile": row["user_char"],
                 "original_user_id": user_id,
                 "following_agentid_list_str": row["following_agentid_list"],
-                "group": group_name 
+                "group": group_name,
+                "attitude_lifestyle_culture": row.get("initial_attitude_lifestyle_culture", 0.0),
+                "attitude_sport_ent": row.get("initial_attitude_sport_ent", 0.0),
+                "attitude_sci_health": row.get("initial_attitude_sci_health", 0.0),
+                "attitude_politics_econ": row.get("initial_attitude_politics_econ", 0.0),
+                "initial_attitude_avg": row.get("initial_attitude_avg", 0.0)
             }
         }
         user_info = UserInfo(
@@ -718,17 +869,26 @@ async def generate_twitter_agent_graph(
             profile=profile, recsys_type='twitter',
         )
         
+        agent_env = SocialAction(agent_id=agent_id, channel=None)
+
+        # --- 【!! 关键修改: ABM Agent 初始化 !!】 ---
+        
+       
         agent = AgentClass(
-            agent_id=agent_id, 
-            user_info=user_info, 
-            agent_graph=agent_graph, 
-            channel=None # Channel 将在 env.reset() 中被连接
-        )
+                agent_id=agent_id,
+                env=agent_env,
+                user_info=user_info  # (LurkerAgent 会从这里解析 attitude_scores)
+            )
+        
         agent_graph.add_agent(agent)
+        # --- 【!! 修改结束 !!】 ---
             
-    # 步骤 B: 遍历 LLM Agents (Tier 1) (重量级 Init, 慢速)
+
+            
+    # 步骤 B: 遍历 LLM Agents (Tier 1) (逻辑不变)
     logger.info(f"(Graph Build) 正在为 {len(tier1_info)} 个 LLM Agents (Tier 1) 创建对象...")
     for agent_id, row in tqdm.tqdm(tier1_info.iterrows(), total=len(tier1_info), desc="Building LLM Agents (This will be slow)"):
+        # --- (所有变量定义保持不变) ---
         user_name = row["username"]
         name = row["name"]
         bio = row["description"]
@@ -742,7 +902,12 @@ async def generate_twitter_agent_graph(
                 "user_profile": row["user_char"],
                 "original_user_id": user_id,
                 "following_agentid_list_str": row["following_agentid_list"],
-                "group": group_name
+                "group": group_name,
+                "attitude_lifestyle_culture": row.get("initial_attitude_lifestyle_culture", 0.0),
+                "attitude_sport_ent": row.get("initial_attitude_sport_ent", 0.0),
+                "attitude_sci_health": row.get("initial_attitude_sci_health", 0.0),
+                "attitude_politics_econ": row.get("initial_attitude_politics_econ", 0.0),
+                "initial_attitude_avg": row.get("initial_attitude_avg", 0.0)
             }
         }
         user_info = UserInfo(
@@ -759,6 +924,9 @@ async def generate_twitter_agent_graph(
             channel=None 
         )
         agent_graph.add_agent(agent)
+
+        posts_for_this_agent = initial_posts_map.get(user_id, [])
+        _preload_agent_memory(agent, posts_for_this_agent)
 
     logger.info(f"(Graph Build) 成功创建 {agent_graph.get_num_nodes()} 个 agent (T1+T2)。")
     
