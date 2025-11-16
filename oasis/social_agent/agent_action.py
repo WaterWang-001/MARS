@@ -11,20 +11,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # =========== Copyright 2023 @ CAMEL-AI.org. All Rights Reserved. ===========
-from typing import Any
+from typing import Any, Optional
 
 from camel.toolkits import FunctionTool
 
 from oasis.social_platform.channel import Channel
 from oasis.social_platform.typing import ActionType
-
+from oasis.social_platform.platform import Platform
 
 class SocialAction:
 
-    def __init__(self, agent_id: int, channel: Channel):
+    # --- [!! 1. 修改 __init__ !!] ---
+    def __init__(
+        self, 
+        agent_id: int, 
+        channel: Channel     
+    ):
         self.agent_id = agent_id
         self.channel = channel
-
     def get_openai_function_list(self) -> list[FunctionTool]:
         return [
             FunctionTool(func) for func in [

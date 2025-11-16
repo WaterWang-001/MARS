@@ -13,10 +13,9 @@
 # =========== Copyright 2023 @ CAMEL-AI.org. All Rights Reserved. ===========
 __version__ = "0.2.3"
 
-from oasis.environment.env_action import LLMAction, ManualAction
+from oasis.environment.env_action import LLMAction, ManualAction, HeuristicAction
 from oasis.environment.make import make
-from oasis.social_agent import (generate_reddit_agent_graph,
-                                generate_twitter_agent_graph)
+from oasis.social_agent import (generate_reddit_agent_graph,generate_and_register_agents)
 from oasis.social_agent.agent import SocialAgent
 from oasis.social_agent.agent_graph import AgentGraph
 from oasis.social_platform.config import UserInfo
@@ -26,6 +25,6 @@ from oasis.testing.show_db import print_db_contents
 
 __all__ = [
     "make", "Platform", "ActionType", "DefaultPlatformType", "ManualAction",
-    "LLMAction", "print_db_contents", "AgentGraph", "SocialAgent", "UserInfo",
-    "generate_reddit_agent_graph", "generate_twitter_agent_graph"
+    "LLMAction", "HeuristicAction", "print_db_contents", "AgentGraph", "SocialAgent", "UserInfo",
+    "generate_reddit_agent_graph", "generate_and_register_agents",
 ]

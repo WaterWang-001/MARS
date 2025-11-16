@@ -12,12 +12,13 @@
 # limitations under the License.
 # =========== Copyright 2023 @ CAMEL-AI.org. All Rights Reserved. ===========
 from .agent import SocialAgent
+from .agent_custom import BaseAgent
 from .agent_graph import AgentGraph
-from .agents_generator import (generate_agents_100w,
+from .agents_generator import (generate_and_register_agents,
                                generate_reddit_agent_graph,
-                               generate_twitter_agent_graph)
+                               generate_custom_agents)
 
 __all__ = [
-    "SocialAgent", "AgentGraph", "generate_agents_100w",
-    "generate_reddit_agent_graph", "generate_twitter_agent_graph"
+    "SocialAgent", "BaseAgent", "AgentGraph", "generate_and_register_agents",
+    "generate_reddit_agent_graph", "generate_custom_agents"
 ]

@@ -12,7 +12,7 @@ import time
 INPUT_DIRECTORY = 'data/raw/'
 # 输出文件：保存处理后的用户-内容数据（帖子+评论）
 
-# 临时数据库文件
+# # 临时数据库文件
 PERMANENT_DB_FILE = 'data/user_post/user_post_database.db'
 # --------------------
 

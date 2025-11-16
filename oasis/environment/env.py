@@ -15,30 +15,30 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import List, Union
+from typing import List, Union, Optional 
 
-# --- [!! 修改 1: 导入 HeuristicAction !!] ---
 from oasis.environment.env_action import (LLMAction, ManualAction,
                                           HeuristicAction)
 from oasis.social_agent.agent import SocialAgent
 from oasis.social_agent.agent_graph import AgentGraph
-# 【!! 关键 !!】确保这个 import 路径是正确的
+try:
+    from oasis.social_agent.agent_custom import BaseAgent
+except ImportError:
+    # (如果 agent_custom.py 不存在, 则回退)
+    from oasis.social_agent.agent import BaseAgent 
+    
 from oasis.social_agent.agents_generator import generate_custom_agents
 from oasis.social_platform.channel import Channel
 from oasis.social_platform.platform import Platform
 from oasis.social_platform.typing import (ActionType, DefaultPlatformType,
                                           RecsysType)
 
-# Create log directory if it doesn't exist
+# ... (日志配置不变) ...
 log_dir = "./log"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
-
-# Configure logger
 env_log = logging.getLogger("oasis.env")
 env_log.setLevel("INFO")
-
-# Add file handler to save logs to file
 current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 file_handler = logging.FileHandler(f"{log_dir}/oasis-{current_time}.log",
                                    encoding="utf-8")
@@ -52,26 +52,22 @@ class OasisEnv:
 
     def __init__(
         self,
-        agent_graph: AgentGraph,
+        agent_graph: Optional[Union[AgentGraph, List[BaseAgent]]],
         platform: Union[DefaultPlatformType, Platform],
         database_path: str = None,
-        calibration_end: datetime =None,
         semaphore: int = 128,
         intervention_file_path: str = None,
     ) -> None:
         r"""Init the oasis environment.
 
         Args:
-            agent_graph: The AgentGraph to use in the simulation.
-            platform: The platform type to use. Including
-                `DefaultPlatformType.TWITTER` or `DefaultPlatformType.REDDIT`.
-                Or you can pass a custom `Platform` instance.
-            database_path: The path to create a sqlite3 database. The file
-                extension must be `.db` such as `twitter_simulation.db`.
+            agent_graph: The Agent list or AgentGraph (legacy).
+                         (在新的 100w 流程中, 这在 'make' 时为 None)
+            ...
         """
         # Initialize the agent graph
         self.agent_graph = agent_graph
-        # Use a semaphore to limit the number of concurrent requests
+        # ... (其余 __init__ 逻辑不变) ...
         self.llm_semaphore = asyncio.Semaphore(semaphore)
         if isinstance(platform, DefaultPlatformType):
             if database_path is None:
@@ -134,20 +130,20 @@ class OasisEnv:
         r"""Start the platform and sign up the agents."""
         self.platform_task = asyncio.create_task(self.platform.running())
         
-       
+
         self.agent_graph = await generate_custom_agents(
-            platform=self.platform, agent_graph=self.agent_graph,CALIBRATION_END=self.calibration_end,time_step_minutes=3)
+            platform=self.platform, 
+            agent_list=self.agent_graph
+        )
         
 
     async def _perform_llm_action(self, agent):
-        r"""Send the request to the llm model and execute the action.
-        """
+        # ... (此方法不变) ...
         async with self.llm_semaphore:
             return await agent.perform_action_by_llm()
 
     async def _perform_interview_action(self, agent, interview_prompt: str):
-        r"""Send the request to the llm model and execute the interview.
-        """
+        # ... (此方法不变) ...
         async with self.llm_semaphore:
             return await agent.perform_interview(interview_prompt)
 
@@ -157,31 +153,21 @@ class OasisEnv:
                                                List[Union[ManualAction,
                                                           LLMAction,
                                                           HeuristicAction]]]]
+        # --- [!! 修改结束 !!] ---
     ) -> None:
-        r"""Update the recommendation system and perform the actions.
-
-        Args:
-            actions(dict[SocialAgent, Union[ManualAction, LLMAction, 
-                HeuristicAction, List[...]]]): The actions to perform.
-                - ManualAction: Pre-defined actions (e.g., post, like).
-                - LLMAction: Triggers the agent's LLM reasoning.
-                - HeuristicAction: Triggers the agent's .step() method.
-        Returns:
-            None
-        """
-        # Update the recommendation system
+        r"""Update the recommendation system and perform the actions."""
+        
+        # ... (step 内部的所有逻辑不变) ...
+        
         await self.platform.update_rec_table()
         env_log.info("update rec table.")
 
-        # Create tasks for both manual and LLM actions
         tasks = []
         for agent, action in actions.items():
             if isinstance(action, list):
                 for single_action in action:
                     if isinstance(single_action, ManualAction):
                         if single_action.action_type == ActionType.INTERVIEW:
-                            # Use the agent's perform_interview method for
-                            # interview actions
                             interview_prompt = single_action.action_args.get(
                                 "prompt", "")
                             tasks.append(
@@ -195,21 +181,16 @@ class OasisEnv:
                     elif isinstance(single_action, LLMAction):
                         tasks.append(self._perform_llm_action(agent))
                     
-
                     elif isinstance(single_action, HeuristicAction):
-                        # 确保 agent 真的有 .step() 方法
                         if hasattr(agent, 'step') and callable(agent.step):
                             tasks.append(agent.step())
                         else:
                             env_log.warning(f"Agent {agent.agent_id} "
                                             "received HeuristicAction but "
                                             "has no .step() method.")
-                    # --- [!! 修改结束 !!] ---
             else:
                 if isinstance(action, ManualAction):
                     if action.action_type == ActionType.INTERVIEW:
-                        # Use the agent's perform_interview method for
-                        # interview actions
                         interview_prompt = action.action_args.get("prompt", "")
                         tasks.append(
                             self._perform_interview_action(
@@ -221,28 +202,22 @@ class OasisEnv:
                 elif isinstance(action, LLMAction):
                     tasks.append(self._perform_llm_action(agent))
                 
-                # --- [!! 修改 4: 添加 HeuristicAction 的处理 (single) !!] ---
                 elif isinstance(action, HeuristicAction):
-                    # 确保 agent 真的有 .step() 方法
                     if hasattr(agent, 'step') and callable(agent.step):
                         tasks.append(agent.step())
                     else:
                         env_log.warning(f"Agent {agent.agent_id} "
                                         "received HeuristicAction but "
                                         "has no .step() method.")
-                # --- [!! 修改结束 !!] ---
 
-        # Execute all tasks concurrently
         await asyncio.gather(*tasks)
         env_log.info("performed all actions.")
-        # # Control some agents to perform actions
-        # Update the clock
+        
         if self.platform_type == DefaultPlatformType.TWITTER:
             self.platform.sandbox_clock.time_step += 1
 
     async def close(self) -> None:
-        r"""Stop the platform and close the environment.
-        """
+        # ... (此方法不变) ...
         await self.channel.write_to_receive_queue(
             (None, None, ActionType.EXIT))
         await self.platform_task

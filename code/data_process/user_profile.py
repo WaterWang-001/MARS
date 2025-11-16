@@ -9,12 +9,13 @@ import sys
 
 # 配置路径（相对于项目根目录）
 PROJECT_ROOT = Path(__file__).parent.parent
+MARS_ROOT= PROJECT_ROOT / "MARS"
 INPUT_FOLDER = PROJECT_ROOT / "data" / "raw"
-OUTPUT_FOLDER = PROJECT_ROOT / "data" / "user_profiles"
+OUTPUT_FOLDER = MARS_ROOT /  "data" / "user_profiles"
 LOG_FOLDER = PROJECT_ROOT / "logs"
 
-# 确保文件夹存在
-OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+# # 确保文件夹存在
+# OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 
 class WeiboToOASISConverter:

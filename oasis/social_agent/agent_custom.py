@@ -4,6 +4,7 @@
 
 import random
 import asyncio
+import sqlite3
 import numpy as np
 from typing import TYPE_CHECKING, Optional, Union, List, Callable, Dict
 # 核心 CAMEL 导入
@@ -34,13 +35,15 @@ class BaseAgent:
                  agent_id: int,
                  user_info: UserInfo,
                  channel: Channel | None = None,
-                 agent_graph: "AgentGraph" = None,
+                 db_path: str | None = None,
                  **kwargs): # 接受额外的参数 (例如 model) 但不使用
-        self.social_agent_id = agent_id
+        # 保留旧 API 兼容性: 主标识符保存在 social_agent_i
+        # 也提供一个常见的别名 `agent_id`，以兼容遗留代码中直接访问 self.agent_id 的用法
+        self.agent_id = agent_id
+        self.db_path = db_path
         self.user_info = user_info
         self.channel = channel or Channel()
         self.env = SocialEnvironment(SocialAction(agent_id, self.channel))
-        self.agent_graph = agent_graph
         self.group = user_info.profile["other_info"].get("group", "default")
     
     async def step(self):
@@ -170,6 +173,7 @@ class LurkerAgent(HeuristicAgent):
         self, 
         agent_id: str, 
         env: SocialAction, 
+        db_path: str,
         # (移除了 initial_attitude: float, 因为我们将从 kwargs['user_info'] 中获取所有4个)
         # (kwargs 中会包含 user_info 等)
         **kwargs 
@@ -208,10 +212,7 @@ class LurkerAgent(HeuristicAgent):
         self.confidence_threshold: float = 0.5  # (ε) 信任阈值 (0 到 2.0)
         self.convergence_mu: float = 0.2        # (μ) 收敛速度 (0 到 0.5)
         self.base_action_prob: float = 0.05     # 基础动作概率 (5%)
-        
-        # (确保 env 是 SocialAction 的一个实例, 以便访问 platform)
-        if not hasattr(self.env, 'platform') or not hasattr(self.env.platform, 'pl_utils'):
-            raise ValueError("LurkerAgent 传入的 'env' 必须是 SocialAction 且已连接到 Platform")
+
 
         print(f"[ABM Lurker {self.agent_id}] created. Attitudes: {self.attitude_scores}")
 
@@ -244,7 +245,7 @@ class LurkerAgent(HeuristicAgent):
         # --- [!! 修改结束 !!] ---
         
         # 2. 访问数据库连接
-        conn = self.env.platform.pl_utils.db_conn
+        conn = sqlite3.connect(self.db_path)
         if not conn:
             print(f"ERROR: Agent {self.agent_id} DB connection is None.")
             return []

@@ -18,18 +18,15 @@ from attitude_annotator import OpenAIAttitudeAnnotator, VLLMAttitudeAnnotator
 
 import oasis
 from oasis import (ActionType, LLMAction, ManualAction, HeuristicAction)
-
-from oasis.social_agent.agents_generator import (
-    generate_twitter_agent_graph
-)
-from oasis.social_agent import AgentGraph
+from oasis import generate_and_register_agents
+from oasis.social_agent import BaseAgent
 from oasis.social_platform.config import UserInfo
 from oasis.social_platform import Platform
-from oasis import EnvAction
 
 
 from attitude_logger import SimulationAttitudeLogger
 from db_manager import reset_simulation_tables
+
 
 # Tier 1: "重" LLM Agents (初始化慢, 运行慢)
 TIER_1_LLM_GROUPS = {
@@ -46,7 +43,7 @@ TIER_2_HEURISTIC_GROUPS = {
 #时间为：2025-06-02 16:30:00
 CALIBRATION_END= "2025-06-02T16:30:00"
 
-
+TIME_STEP_MINUTES= 3
 
 
 async def main():
@@ -68,14 +65,20 @@ async def main():
     logger.info(f"日志将保存到: {log_file_path}")
     logger.info("正在初始化模型...")
     # --- (配置结束) ---
-   
-    # model = ModelFactory.create(...)
-    model= VLLMModel(
-        model_type="/remote-home/JuelinW/oasis_project/Qwen2.5-7B-Instruct",
-        model_config_dict={
-            "temperature": 0.5
-        }
+    model = ModelFactory.create(
+        model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+        model_type="gpt-4o-mini",
+        url='https://api.nuwaapi.com/v1',
+        api_key='sk-Ty4q1iA8Jw7Zq3T9m9yeMaOsMAyOXdlvklR7jqZOHgpCV8Wy',
     )
+   
+    # model= VLLMModel(
+    #     model_type="/remote-home/JuelinW/oasis_project/Qwen2.5-7B-Instruct",
+    #     model_config_dict={
+    #         "temperature": 0.5
+    #     }
+    # )
+        
     logger.info("模型初始化完毕。")
     
     # --- AttitudeAnnotator 配置 ---
@@ -90,7 +93,7 @@ async def main():
     logger.info("正在初始化 AttitudeAnnotator...")
     # annotator = OpenAIAttitudeAnnotator(...)
     annotator = VLLMAttitudeAnnotator(
-        model_type="/remote-home/JuelinW/oasis_project/Qwen2.5-7B-Instruct",
+        model_name="/remote-home/JuelinW/oasis_project/Qwen2.5-7B-Instruct",
         attitude_columns=ATTITUDE_COLUMNS,
         concurrency_limit=200
     )
@@ -106,42 +109,43 @@ async def main():
         ActionType.QUOTE_POST
     ]
 
-    profile_path = "data/oasis/oasis_agent_init_3000_random.csv" 
-    db_path = "data/oasis/oasis_database_3000_random.db" 
-    intervention_file_path = "data/oasis/intervention_messages.csv" # <-- 您要加载的干预文件
+    profile_path = "oasis_test/oasis/oasis_agent_init_100000_random.csv" 
+    db_path = "oasis_test/oasis/oasis_database_100000_random.db" 
+    intervention_file_path = "oasis_test/oasis/intervention_messages.csv" # <-- 您要加载的干预文件
   
-    # 1. 在内存中构建 Agent Graph
-    logger.info(f"正在从 {profile_path} 构建 agent graph...")
-    agent_graph = await generate_twitter_agent_graph(
-        profile_path=profile_path,
-        model=model,
-        available_actions=available_actions,
-        db_path=db_path
-    )
-    logger.info(f"Agent graph 构建完毕, 共 {agent_graph.get_num_nodes()} 个 agents (T1+T2)。")
 
-    # 2. 重置数据库, 删除模拟结果表, 保留核心数据表
+    # 1. 重置数据库, 删除模拟结果表, 保留核心数据表
+    logger.info("步骤 1: 正在重置数据库...")
     tables_to_keep = [
         'post', 
         'ground_truth_post', 
         'sqlite_sequence'
     ]
-
-
-    # 调用外部函数
     reset_simulation_tables(db_path, tables_to_keep, logger)
 
     # 3. (快速) 创建环境
-    logger.info("正在创建 Oasis 环境 (oasis.make)...")
-    # --- [!! 修改: 传递干预文件路径 !!] ---
+    logger.info("步骤 2: 正在创建 Oasis 环境 (platform)...")
     env = oasis.make(
-            agent_graph=agent_graph, 
+            agent_graph=None, 
             platform=oasis.DefaultPlatformType.TWITTER,
             database_path=db_path,
-            calibration_end=CALIBRATION_END,
-            intervention_file_path=intervention_file_path # <-- 传递路径
+            intervention_file_path=intervention_file_path
     )
-    # --- [!! 修改结束 !!] ---
+    logger.info("环境和 Platform 已创建。")
+    logger.info(f"步骤 3: 正在从 {profile_path} 生成、注册并回填所有 Agents...")
+    
+    agent_list: List[BaseAgent] = await generate_and_register_agents(
+        profile_path=profile_path,
+        db_path=db_path,
+        platform=env.platform, 
+        model=model,
+        available_actions=available_actions,
+        CALIBRATION_END=CALIBRATION_END,
+        TIME_STEP_MINUTES=TIME_STEP_MINUTES 
+    )
+    logger.info(f"Agent 生成和注册完毕, 共 {len(agent_list)} 个 agents。")
+    
+    env.agent_graph = agent_list
 
     logger.info("正在执行环境重置 (env.reset)...")
     await env.reset()
@@ -170,7 +174,7 @@ async def main():
         "潜水用户": 0.1, 
     }
     
-    total_steps = 5
+    total_steps = 0
     for step in range(total_steps):
         current_step = step + 1 # (从 1 开始计数)
         logger.info(f"--- 🚀 Simulation Step {current_step} / {total_steps} ---")

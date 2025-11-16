@@ -129,6 +129,63 @@ class Platform:
         if intervention_file_path:
             self._load_interventions_from_csv(intervention_file_path)
 
+    def _load_interventions_from_csv(self, file_path: str):
+        """
+        (私有) 从 CSV 读取干预数据并加载到 'intervention_message' 表。
+        """
+        pl_log.info(f"Attempting to load interventions from: {file_path}")
+        
+        if not os.path.exists(file_path):
+            pl_log.warning(f"Intervention file not found: {file_path}. Skipping.")
+            return
+        
+        try:
+            df = pd.read_csv(file_path, encoding='utf-8')
+            
+            required_cols = ['time_step', 'content']
+            if not all(col in df.columns for col in required_cols):
+                pl_log.error(
+                    f"Intervention file {file_path} is missing required "
+                    f"columns: {required_cols}. Skipping."
+                )
+                return
+            
+            df_to_insert = df[required_cols]
+
+            # [!! 修复: 不检查 pl_utils.get_db_connection !!]
+            # [!! 修复: 直接使用 self.db, 这是 Platform 自己的连接 !!]
+            if not hasattr(self, 'db'):
+                 pl_log.error("Platform has no 'db' attribute. Cannot load interventions.")
+                 return
+                 
+            # (使用 self.db, 这是 __init__ 中创建的连接)
+            conn = self.db 
+            try:
+                pl_log.info("Clearing old interventions from 'intervention_message' table...")
+                conn.execute("DELETE FROM intervention_message;")
+                
+                pl_log.info(f"Loading {len(df_to_insert)} new interventions into database...")
+                df_to_insert.to_sql(
+                    'intervention_message',
+                    con=conn,
+                    if_exists='append',
+                    index=False
+                )
+                conn.commit()
+                pl_log.info(f"Successfully loaded {len(df_to_insert)} interventions.")
+            
+            except Exception as e:
+                pl_log.error(f"Database operation failed during intervention load: {e}", exc_info=True)
+                try:
+                    conn.rollback()
+                except Exception as rb_e:
+                    pl_log.error(f"Rollback failed: {rb_e}")
+
+        except pd.errors.EmptyDataError:
+            pl_log.warning(f"Intervention file {file_path} is empty. Skipping.")
+        except Exception as e:
+            pl_log.error(f"Failed to load intervention file {file_path}: {e}", exc_info=True)
+
 
     async def running(self):
         while True:
@@ -1728,57 +1785,4 @@ class Platform:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _load_interventions_from_csv(self, file_path: str):
-        """
-        (私有) 从 CSV 读取干预数据并加载到 'intervention_message' 表。
-        """
-        pl_log.info(f"Attempting to load interventions from: {file_path}")
-        
-        # 1. 检查文件是否存在
-        if not os.path.exists(file_path):
-            pl_log.warning(f"Intervention file not found: {file_path}. Skipping.")
-            return
-        
-        try:
-            # 2. 读取 CSV
-            df = pd.read_csv(file_path, encoding='utf-8')
-            
-            # 3. 验证 schema (根据您的定义)
-            required_cols = ['time_step', 'content']
-            if not all(col in df.columns for col in required_cols):
-                pl_log.error(
-                    f"Intervention file {file_path} is missing required "
-                    f"columns: {required_cols}. Skipping."
-                )
-                return
-            
-            # 只选择我们需要的列
-            df_to_insert = df[required_cols]
-
-            # 4. 连接数据库并写入
-            # (假设 self.pl_utils 存在并且有 get_db_connection 方法)
-            if not hasattr(self, 'pl_utils') or not hasattr(self.pl_utils, 'get_db_connection'):
-                 pl_log.error("Platform has no 'pl_utils' or 'pl_utils.get_db_connection' for DB connection. Cannot load interventions.")
-                 return
-                 
-            with self.pl_utils.get_db_connection() as conn:
-                pl_log.info("Clearing old interventions from 'intervention_message' table...")
-                # 5. 清除旧数据，确保模拟运行是干净的
-                conn.execute("DELETE FROM intervention_message;")
-                
-                pl_log.info(f"Loading {len(df_to_insert)} new interventions into database...")
-                # 6. 插入新数据
-                df_to_insert.to_sql(
-                    'intervention_message', # 目标表名
-                    con=conn,
-                    if_exists='append', # 追加到刚被清空的表
-                    index=False
-                )
-                conn.commit()
-            
-            pl_log.info(f"Successfully loaded {len(df_to_insert)} interventions.")
-
-        except pd.errors.EmptyDataError:
-            pl_log.warning(f"Intervention file {file_path} is empty. Skipping.")
-        except Exception as e:
-            pl_log.error(f"Failed to load intervention file {file_path}: {e}", exc_info=True)
+ 
