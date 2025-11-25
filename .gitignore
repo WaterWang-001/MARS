@@ -1,0 +1,22 @@
+# 忽略数据目录 (最重要!)
+data/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 数据库文件 (包括临时文件)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 系统/IDE生成文件
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
