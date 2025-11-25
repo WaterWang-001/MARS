@@ -41,9 +41,9 @@ MARS allows researchers to define dynamic attitude metrics **without changing th
 ### 4. 🧠 Internal State & Tool-Calling Mechanism
 We implement a **"Mind-Action" consistency loop** using Parallel Function Calling. In every simulation step, an LLM Agent performs a **Dual-Action Mandate**:
 
-**Internal Update:** Calls `update_internal_attitude` to adjust its own psychological state (e.g., emotion, stance) based on the environment.
-**External Action:** Calls a social tool (e.g., `create_post`, `like`, `repost`) that reflects this updated state.
-**Persistence:** All internal state changes are logged to the database for temporal analysis.
+* **Internal Update:** Calls `update_internal_attitude` Tool to adjust its own psychological state (e.g., emotion, stance) based on the environment.
+* **External Action:** Calls a social tool (e.g., `create_post`, `like`, `repost`) that reflects this updated state.
+* **Persistence:** All internal state changes are logged to the database for temporal analysis.
 
 ### 5. 🛠 Multi-Modal Intervention System
 The engine supports a sophisticated intervention system to simulate external forces on the social network. Configurable via a unified CSV file:
