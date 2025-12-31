@@ -1,268 +1,219 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
-from typing import Dict, List
-import zipfile
-import tempfile
 import shutil
+import zipfile
 import os
-import errno
+import time
 
-# 项目根
-REPO_ROOT = Path(__file__).resolve().parents[3]  # ../../.. -> /remote-home/JuelinW/oasis_project
+# --- 1. 环境配置 ---
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from MARS.code.data_process.user_post import UserPostProcessor
-from MARS.code.data_process.user_profile import WeiboToOASISConverter
-from MARS.code.data_process.user_relationship import UserRelationshipPipeline 
-from MARS.code.data_process import user_profile 
+# --- 2. 导入模块 ---
+# 导入模块本身 (用于修改全局配置变量)
+from MARS.code.data_process import user_post         # 适配 UnifiedProcessor
+from MARS.code.data_process import user_profile      # 适配 ParallelProcessor
+from MARS.code.data_process import user_relationship # 适配 FastRelationshipPipeline
+
+# 导入处理类
+# 假设你已经把 UnifiedProcessor 的代码放入了 user_post.py
+from MARS.code.data_process.user_post import UnifiedProcessor
+from MARS.code.data_process.user_profile import ParallelProcessor
+from MARS.code.data_process.user_relationship import FastRelationshipPipeline as UserRelationshipPipeline
+
 
 PROJECT_ROOT = REPO_ROOT
 
+# --- 3. 辅助函数 ---
+
 def make_default_paths(out_dir: Path):
+    """生成默认输出路径配置"""
     out_dir = Path(out_dir)
     return {
+        # Post 相关 (UnifiedProcessor 直接输出最终 DB)
         "db_path": str(out_dir / "user_post_database.db"),
-        "db_log_path": str(out_dir/"processed_file.log"),
-        # 新增：定义 profiles 文件的父目录，通常就是 out_dir
+        "post_log_path": str(out_dir / "processed_posts.log"), # ETL 专用日志
+        
+        # Profile 相关
         "profiles_folder": str(out_dir), 
         "profiles_out": str(out_dir / "user_profiles.csv"),
+        "profiles_log": str(out_dir / "processed_profiles.log"),
+        
+        # Relationship 相关
         "matrix_out": str(out_dir / "attention_matrix_edges.csv"),
         "scores_out": str(out_dir / "total_attention_scores.csv"),
-        "follow_out": str(out_dir / "user_follow_list.csv"),
+        "edges_temp_dir": str(out_dir / "temp_edges"), 
     }
 
 def unzip_and_flatten(input_dir: str, pattern: str = "*.zip", keep_original_zip: bool = True):
-    """
-    解压 input_dir 下所有 zip 文件，并把所有 .txt 文件扁平移动到 input_dir 根目录。
-    - pattern: zip 文件匹配模式（默认 *.zip）
-    - keep_original_zip: 是否保留原始 zip 文件（默认 True）
-    行为：
-      * <--- 修改：不再使用临时目录，直接流式解压 .txt 文件到 input_dir
-      * 将解出的所有 .txt 文件移动到 input_dir，
-        若遇到同名文件则自动加后缀避免覆盖，例如 name_1.txt
-      * 自动跳过已处理过的 zip 文件（通过 .processed_zips.log 记录）
-    """
+    """解压并扁平化处理"""
     src = Path(input_dir)
-    if not src.exists() or not src.is_dir():
-        print(f"[unzip] Source directory not found: {src}")
+    if not src.exists():
+        print(f"[Unzip] 目录不存在: {src}")
         return
 
     log_file = src / ".processed_zips.log"
     processed_set = set()
 
-    # 1. 读取已处理列表
     if log_file.exists():
         try:
             with open(log_file, "r", encoding="utf-8") as f:
                 processed_set = {line.strip() for line in f if line.strip()}
-        except Exception as e:
-            print(f"[unzip] Warning: Could not read log file {log_file}: {e}")
+        except Exception:
+            pass
 
     zip_files = list(src.glob(pattern))
     if not zip_files:
-        print("[unzip] No zip files found.")
+        # 如果没有zip，也不报错，可能已经是解压好的txt了
         return
 
-    src.mkdir(parents=True, exist_ok=True)
-    
-    # 2. 准备日志文件写入 (使用 'a' a+ 模式)
-    try:
-        log_f = open(log_file, "a", encoding="utf-8")
-    except Exception as e:
-        print(f"[unzip] Fatal: Could not open log file for writing {log_file}: {e}")
-        return 
+    print(f"[Unzip] 发现 {len(zip_files)} 个压缩包，检查解压...")
 
-    print(f"[unzip] Found {len(zip_files)} zips. {len(processed_set)} already processed.")
-
-    with log_f:
+    with open(log_file, "a", encoding="utf-8") as log_f:
         for z in zip_files:
-            # 3. 检查是否跳过
             if z.name in processed_set:
-                print(f"[unzip] Skipping (already processed): {z.name}")
                 continue
-
+            
             try:
-                print(f"[unzip] Processing: {z.name} ...")
-                
-                files_moved = 0
-                
-                # <--- 修改：不再使用 TemporaryDirectory
-                # <--- 修改：将 BadZipFile 异常捕获移到这里
-                try:
-                    with zipfile.ZipFile(z, "r") as zf:
-                        # <--- 新增：遍历 zip 包内的所有文件信息
-                        for file_info in zf.infolist():
-                            # 跳过目录
-                            if file_info.is_dir():
-                                continue
-                                
-                            # 获取纯文件名（关键：这可以防止路径遍历攻击并实现扁平化）
-                            fn = Path(file_info.filename).name
-                            
-                            # 只处理 .txt 文件
-                            if fn.lower().endswith(".txt") and fn:
-                                # 检查目标文件是否存在，并处理同名冲突
-                                dest = src / fn
-                
-                                
-                                # <--- 新增：流式解压单个文件
-                                # 从 zip 包中打开文件（读）
-                                # 在目标目录创建文件（写）
-                                # copyfileobj 逐块复制，占用内存小
-                                try:
-                                    with zf.open(file_info) as zip_f:
-                                        with open(dest, "wb") as out_f:
-                                            shutil.copyfileobj(zip_f, out_f)
-                                    files_moved += 1
-                                except Exception as extract_e:
-                                    print(f"[unzip] Error extracting file {file_info.filename}: {extract_e}")
-                                    pass # 跳过这个文件，继续处理包内其他文件
-
-                except zipfile.BadZipFile:
-                    print(f"[unzip] Skipping (bad zip): {z.name}")
-                    continue # 跳过损坏的 zip
-
-                # <--- 修改：移除了 os.walk 和 shutil.move 逻辑
-                
-                print(f"[unzip] -> Extracted {files_moved} .txt files from {z.name}")
-                
-                # 4. 如果成功（未抛出异常），记录到日志
+                print(f"  -> Unzipping: {z.name}")
+                with zipfile.ZipFile(z, "r") as zf:
+                    for file_info in zf.infolist():
+                        if file_info.is_dir(): continue
+                        fn = Path(file_info.filename).name
+                        if fn.lower().endswith(".txt") and fn:
+                            dest = src / fn
+                            if not dest.exists():
+                                with zf.open(file_info) as source, open(dest, "wb") as target:
+                                    shutil.copyfileobj(source, target)
                 log_f.write(f"{z.name}\n")
-                log_f.flush() # 确保立即写入
-                
-                # 5. （可选）删除
+                log_f.flush()
                 if not keep_original_zip:
-                    try:
-                        z.unlink()
-                    except Exception as del_e:
-                        print(f"[unzip] Warning: Could not delete original zip {z.name}: {del_e}")
-                        pass
-                        
+                    z.unlink()
             except Exception as e:
-                # 单个 zip 失败不要中断整个流程
-                print(f"[unzip] ERROR processing {z.name} (will retry next time): {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-    
-    print("[unzip] Flattening complete.")
+                print(f"  ❌ 解压出错 {z.name}: {e}")
 
+# --- 4. 核心任务函数 ---
 
-def run_posts(input_dir: str, db_path: str,log_path:str):
-    # 在处理之前先解压并扁平化所有 zip（避免外部 sh）
-    print("[posts] 1/2 Checking/Unzipping files...") 
-    unzip_and_flatten(input_dir)
-    print("[posts] 2/2 Running post processor...") 
+def run_posts(input_dir: str, db_path: str, log_path: str):
+    print(f"\n[Task: Post (Unified ETL)] Start.")
+    print(f"  -> Input: {input_dir}")
+    print(f"  -> DB Output: {db_path}")
     
-
-    proc = UserPostProcessor(input_directory=input_dir, db_path=db_path,log_path=log_path)
-    
-    print(f"[posts] input={input_dir} -> db={db_path}")
-    return proc.run()
-
-
-def run_profiles(input_dir: str, profiles_folder: str, profiles_out: str):
-    # profiles_out 是文件路径，profiles_folder 是报告目录
-    
-    # 覆盖模块级常量
-    if input_dir:
-        setattr(user_profile, "INPUT_FOLDER", Path(input_dir))
-    
-    # 确保同时设置 OUTPUT_FOLDER (用于报告) 和 OUTPUT_PATH (用于 CSV)
-    if profiles_folder:
-        # 🌟 关键：设置 OUTPUT_FOLDER 为目录
-        setattr(user_profile, "OUTPUT_FOLDER", Path(profiles_folder))
-        # 确保目录存在
-        Path(profiles_folder).mkdir(parents=True, exist_ok=True)
-        
-    if profiles_out:
-        # 🌟 关键：设置 OUTPUT_PATH 为 CSV 文件
-        setattr(user_profile, "OUTPUT_PATH", Path(profiles_out))
   
-    conv = WeiboToOASISConverter()
     
-    # <--- 修改：getattr 现在会作用于我们新导入的 user_profile 模块
-    print(f"[profiles] input={input_dir} -> out={getattr(user_profile, 'OUTPUT_PATH', 'unspecified')}")
-    conv.process_all_files()
-    df = conv.save_to_csv()
-    conv.save_report()
-    return df
+    user_post.INPUT_DIRECTORY = Path(input_dir)  # 修改输入目录
+    
+    # 修改数据库路径 (兼容变量名可能的不同)
+    if hasattr(user_post, 'FINAL_DB_FILE'):
+        user_post.FINAL_DB_FILE = Path(db_path)
+        
+    # 修改日志路径
+    if hasattr(user_post, 'PROCESSED_LOG_FILE'):
+        user_post.PROCESSED_LOG_FILE = Path(log_path)
 
 
-def run_relationships(input_dir: str, matrix_out: str, scores_out: str, quantile: float):
-    # 调用已修改的 UserRelationshipPipeline.run -> 返回 (edges_df, total_scores)
-    pipeline = UserRelationshipPipeline(input_directory=input_dir, global_noise_quantile=quantile)
-    print(f"[relationships] input={input_dir} -> matrix={matrix_out}, scores={scores_out}")
-    edges_df, scores_series = pipeline.run(output_matrix_csv=matrix_out,
-                                           output_scores_csv=scores_out,
-                                           save_scores=True)
-    return edges_df, scores_series
+    proc = UnifiedProcessor(input_dir=input_dir, db_path=db_path)
+    
+    # 有些版本的 UnifiedProcessor 可能没有把 log_path 放在 init 里，
+    # 而是直接用的 PROCESSED_LOG_FILE 全局变量，所以上面的 Monkey Patch 很重要。
+    
+    proc.run()
+    print("[Task: Post] Done.")
 
+def run_profiles(input_dir: str, profiles_out: str, profiles_folder: str, profiles_log: str):
+    print(f"\n[Task: Profile] Start.")
+    print(f"  -> CSV Output: {profiles_out}")
 
-def run_all(input_dir: str, out_dir: str, quantile: float):
-    print("0/4 - Checking/Unzipping files...") 
+    # 注入全局配置
+    user_profile.INPUT_FOLDER = Path(input_dir)
+    user_profile.OUTPUT_PATH = Path(profiles_out)
+    user_profile.OUTPUT_FOLDER = Path(profiles_folder)
+    user_profile.PROCESSED_FILES_LOG = Path(profiles_log)
+    
+    Path(profiles_folder).mkdir(parents=True, exist_ok=True)
+
+    converter = ParallelProcessor()
+    converter.run()
+    print("[Task: Profile] Done.")
+
+def run_relationships(input_dir: str, matrix_out: str, scores_out: str, temp_dir: str):
+    print(f"\n[Task: Relationship] Start.")
+    print(f"  -> Matrix Output: {matrix_out}")
+
+    # 注入全局配置
+    user_relationship.INPUT_DIRECTORY = Path(input_dir)
+    user_relationship.OUTPUT_MATRIX_CSV = Path(matrix_out)
+    user_relationship.OUTPUT_SCORES_CSV = Path(scores_out)
+    user_relationship.TEMP_OUTPUT_DIR = Path(temp_dir)
+    
+    pipeline = UserRelationshipPipeline()
+    pipeline.run()
+    print("[Task: Relationship] Done.")
+
+def run_all(input_dir: str, out_dir: str):
+    start_all = time.time()
+    
+    # 1. 解压
     unzip_and_flatten(input_dir)
-
+    
+    # 2. 准备路径
     paths = make_default_paths(Path(out_dir))
-    # Ensure base output dirs
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     
+    # 3. 顺序执行
+    # 注意：UnifiedProcessor 不需要中间 Raw DB，它直接一步到位生成 Final DB
+    run_posts(input_dir, paths['db_path'], paths['post_log_path'])
+    
+    run_profiles(input_dir, paths['profiles_out'], paths['profiles_folder'], paths['profiles_log'])
+    
+    # run_relationships(input_dir, paths['matrix_out'], paths['scores_out'], paths['edges_temp_dir'])
+    
+    print(f"\n✅ All Pipeline Tasks Completed in {time.time() - start_all:.2f}s.")
+    print(f"📂 Outputs in: {out_dir}")
 
-    print("1/4 - posts -> db")
-    run_posts(input_dir=input_dir, db_path=paths["db_path"], log_path=paths["db_log_path"])
-
-    print("2/4 - profiles")
-    # <--- 修改：run_profiles 期待的 profiles_out 是 *文件*路径，其父目录才是输出目录
-    run_profiles(input_dir=input_dir, 
-                 profiles_folder=paths["profiles_folder"], # 新增参数
-                 profiles_out=paths["profiles_out"])
-
-    print("3/4 - relationships (produce raw interaction matrix and scores)")
-    run_relationships(input_dir=input_dir,
-                      matrix_out=paths["matrix_out"],
-                      scores_out=paths["scores_out"],
-                      quantile=quantile)
-
-    print("✅ Pipeline completed. All outputs under:", out_dir)
-
+# --- 5. Main 入口 ---
 
 def main():
-    parser = argparse.ArgumentParser(description="简化版数据处理 pipeline（统一输出到一个 out 目录）")
-    parser.add_argument("mode", choices=["all", "posts", "profiles", "relationships"], help="运行模式")
-    parser.add_argument("--input", required=False, help="raw input folder")
-    parser.add_argument("--out", required=False, help="统一输出目录 (默认: project/output)")
-    parser.add_argument("--quantile", type=float, default=0.25, help="全局噪声分位数（用于关系/关注列表）")
+    parser = argparse.ArgumentParser(description="OASIS Data Processing Pipeline (Unified ETL)")
+    parser.add_argument("mode", choices=["all", "posts", "profiles", "relationships"], help="Execution Mode")
+    parser.add_argument("--input", required=False, help="Raw data folder (default: data/raw)")
+    parser.add_argument("--out", required=False, help="Output folder (default: MARS/output)")
+    
     args = parser.parse_args()
 
     input_dir = args.input or str(PROJECT_ROOT / "data" / "raw")
     out_dir = args.out or str(PROJECT_ROOT / "MARS" / "output")
     paths = make_default_paths(Path(out_dir))
-
+    
     try:
         if args.mode == "all":
-            run_all(input_dir=input_dir, out_dir=out_dir, quantile=args.quantile)
+            run_all(input_dir, out_dir)
+            
         elif args.mode == "posts":
             Path(out_dir).mkdir(parents=True, exist_ok=True)
-            run_posts(input_dir=input_dir, db_path=paths["db_path"],log_path=paths["db_log_path"])
+            unzip_and_flatten(input_dir) 
+            run_posts(input_dir, paths['db_path'], paths['post_log_path'])
+            
         elif args.mode == "profiles":
-            # <--- 修改：确保 profile 输出*文件*的*父*目录存在
-            Path(paths["profiles_out"]).parent.mkdir(parents=True, exist_ok=True)
-            run_profiles(input_dir=input_dir, profiles_out=paths["profiles_out"])
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            unzip_and_flatten(input_dir)
+            run_profiles(input_dir, paths['profiles_out'], paths['profiles_folder'], paths['profiles_log'])
+            
         elif args.mode == "relationships":
             Path(out_dir).mkdir(parents=True, exist_ok=True)
-            run_relationships(input_dir=input_dir,
-                              matrix_out=paths["matrix_out"],
-                              scores_out=paths["scores_out"],
-                              quantile=args.quantile)
+            unzip_and_flatten(input_dir)
+            run_relationships(input_dir, paths['matrix_out'], paths['scores_out'], paths['edges_temp_dir'])
+            
+    except KeyboardInterrupt:
+        print("\n🛑 Pipeline interrupted by user.")
+        sys.exit(1)
     except Exception as e:
-        print(f"Pipeline error: {e}")
+        print(f"\n❌ Pipeline failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

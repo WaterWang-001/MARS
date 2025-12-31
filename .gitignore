@@ -1,5 +1,7 @@
 # 忽略数据目录 (最重要!)
 data/
+MARS/data/
+
 
 # Python 缓存
 __pycache__/
