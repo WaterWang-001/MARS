@@ -3,7 +3,7 @@
 # 1. LLM 服务配置 (全局统一，因为现在是单 Client 并行调用)
 llm_service:
   mode: "remote"
-  api_key: "sk-IlGc1I7XSN24DwcO90Ba5bA7859047FfAf8c2f86AdA94eA5"  # 本地服务通常不需要 Key
+  api_key: ""  # 本地服务通常不需要 Key
   base_url: "https://api.ai-gaochao.cn/v1" 
   model_name: "deepseek-v3"
   
