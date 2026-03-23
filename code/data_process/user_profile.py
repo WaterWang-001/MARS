@@ -1,12 +1,12 @@
 import json
-import numpy as np
 import pandas as pd
 from pathlib import Path
 import random
-from datetime import datetime
 import multiprocessing
 import time
 import os
+import csv
+from collections import defaultdict
 
 # 尝试加速 JSON 解析
 try:
@@ -16,74 +16,232 @@ except ImportError:
     import json
     JSON_LIB = json
 
-# 配置
-PROJECT_ROOT = Path(__file__).parent.parent
+# ================= 配置区域 =================
+try:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+except NameError:
+    PROJECT_ROOT = Path('.').resolve()
+
 OUTPUT_FOLDER = PROJECT_ROOT / "data" / "user_profiles"
-OUTPUT_PATH = OUTPUT_FOLDER / "user_profiles.csv"
 INPUT_FOLDER = PROJECT_ROOT / "data" / "raw"
 PROCESSED_FILES_LOG = OUTPUT_FOLDER / "processed_files_record.txt"
 
-# --- 静态辅助函数 (保持不变) ---
-def is_core_user_static(followers, verified):
-    if verified or followers > 10000:
-        return True
-    elif followers > 1000:
-        return random.random() < 0.3
-    else:
-        return False
+# 1. 字段映射表 (原始字段 -> CSV列名)
+FIELD_MAPPING = {
+    # 身份标识
+    'sjcjId': 'user_id',
+    'sjcjAuthorAccount': 'user_id', # Fallback
+    'sjcjNickName': 'username',
+    'sjcjDescription': 'bio',
+    'sjcjGender': 'gender',
+    # 'sjcjProfileImageUrl': 'avatar_url',  <-- [保持] 移除 avatar_url
+    
+    # 核心数据
+    'sjcjFollowersCount': 'followers_count',
+    'sjcjFriendsCount': 'following_count',
+    'sjcjStatusesCount': 'posts_count',
+    'sjcjProductionNum': 'posts_count',
+    'sjcjFavouritesCount': 'favorites_count',
+    'sjcjAttitudesCount': 'likes_received_count',
+    
+    # 位置信息
+    'sjqxProvince': 'province',
+    'sjqxCity': 'city',
+    'sjcjLocation': 'location',
+    'sjcjIpLocation': 'ip_location',
+    
+    # 时间与状态
+    'sjcjRegistrationTime': 'registration_time',
+    'sjqxLastPublished': 'last_active_time',
+    'sjqxLastUpdatetime': 'last_update_time',
+    'sjcjVerified': 'is_verified',
+    'sjcjVerifiedType': 'verified_type',
+    'sjqxSourceClient': 'device_source'
+}
+
+# [保持] 定义字段顺序列表
+ORDERED_COLUMNS = [
+    'user_id', 
+    'username', 
+    'gender', 
+    'bio', 
+    'is_verified', 
+    'verified_type',
+    'followers_count', 
+    'following_count', 
+    'posts_count', 
+    'favorites_count', 
+    'likes_received_count', 
+    'province', 
+    'city', 
+    'location', 
+    'ip_location', 
+    'registration_time', 
+    'last_active_time', 
+    'last_update_time',
+    'device_source',
+    'platform',
+    'is_core_user'
+]
+
+# 2. 平台字段白名单 (Schema)
+PLATFORM_SCHEMA = {
+    'weibo': {
+        'user_id', 'username', 'bio', 'gender', 'followers_count', 'following_count', 
+        'posts_count', 'favorites_count', 'province', 'city', 'location', 'ip_location', 
+        'registration_time', 'is_verified', 'verified_type', 'device_source',
+        'last_active_time', 'last_update_time'
+    },
+    'toutiao': {
+        'user_id', 'username', 'bio', 'followers_count', 'following_count', 
+        'posts_count', 'likes_received_count', 'province', 'city', 'ip_location', 
+        'is_verified', 'verified_type', 'last_active_time', 'last_update_time'
+    },
+    'xiaohongshu': {
+        'user_id', 'username', 'bio', 'gender', 'followers_count', 'following_count', 
+        'posts_count', 'favorites_count', 'likes_received_count', 'province', 'city', 'ip_location', 
+        'is_verified', 'verified_type', 'last_active_time', 'last_update_time'
+    },
+    'douban': {
+        'user_id', 'username', 'followers_count', 'following_count', 
+        'posts_count', 'favorites_count', 'likes_received_count', 'province', 'city', 'ip_location', 
+        'last_active_time', 'last_update_time'
+    },
+    'zhihu': {
+        'user_id', 'username', 'bio', 'followers_count', 'following_count', 
+        'posts_count', 'favorites_count', 'likes_received_count', 'province', 'city', 'location', 'ip_location', 
+        'is_verified', 'verified_type', 'last_active_time', 'last_update_time'
+    }
+}
+
+# [更新] 增强版平台映射表
+PLATFORM_MAP = {
+    "新浪微博": "weibo",
+    "微博": "weibo",
+    "微博视频号": "weibo",  # 👈 关键修复
+    "今日头条": "toutiao",
+    "今日头条微头条": "toutiao",
+    "西瓜视频": "toutiao",
+    "小红书": "xiaohongshu",
+    "豆瓣": "douban",
+    "知乎": "zhihu"
+}
+
+# ================= 核心逻辑 =================
+
+def get_platform_key(raw_site):
+    """
+    [同步更新] 增强型平台匹配逻辑 (与 Post 处理逻辑保持一致)
+    """
+    if not raw_site:
+        return "other"
+    
+    # 1. 精确匹配
+    if raw_site in PLATFORM_MAP:
+        return PLATFORM_MAP[raw_site]
+    
+    # 2. 模糊匹配
+    site_str = str(raw_site)
+    if "微博" in site_str: return "weibo"
+    if "头条" in site_str or "西瓜" in site_str: return "toutiao"
+    if "小红书" in site_str: return "xiaohongshu"
+    if "豆瓣" in site_str: return "douban"
+    if "知乎" in site_str: return "zhihu"
+    
+    return "other"
+
+def safe_bool(val):
+    if val is None: return False
+    if isinstance(val, bool): return val
+    if isinstance(val, str):
+        return val.lower() == 'true'
+    return bool(val)
 
 def process_file_worker(filepath):
-    """Worker 进程：解析逻辑不变"""
-    extracted_users = {}
+    extracted_data = [] 
+    seen_in_file = set()
+    
+    # [同步更新] 定义查找字段优先级
+    site_keys = ['sjqxCaptureWebsite', 'sjcjCaptureWebsite', 'sjqxCaptureWebsiteNew']
+
+    def _get_site_from_pojo(pojo):
+        if not pojo: return None
+        for key in site_keys:
+            val = pojo.get(key)
+            if val: return val
+        return None
+    
     try:
-        with open(filepath, 'rb') as f:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             for line in f:
+                if not line.strip(): continue
                 try:
                     data = JSON_LIB.loads(line)
-                    targets = [
-                        (data.get('authorContentPojo'), 'content_author'),
-                        (data.get('authorCommentPojo'), 'comment_author'),
-                        (data.get('authorCommentForwardPojo'), 'forward_author')
-                    ]
-                    for user_data, u_type in targets:
+                    
+                    # 1. 确定平台 [逻辑更新]
+                    # 优先从 contentPojo 找，找不到再去 commentPojo
+                    raw_site = _get_site_from_pojo(data.get('contentPojo'))
+                    if not raw_site:
+                        raw_site = _get_site_from_pojo(data.get('commentPojo'))
+                    
+                    platform = get_platform_key(raw_site)
+                    schema = PLATFORM_SCHEMA.get(platform, PLATFORM_SCHEMA['weibo'])
+                    
+                    # 2. 定义提取目标 (Target List)
+                    targets = []
+                    
+                    # (A) 基础提取
+                    targets.append(data.get('authorContentPojo'))
+                    targets.append(data.get('authorCommentPojo'))
+                    
+                    # (B) 扩展提取：原贴作者
+                    if platform in ['weibo', 'douban', 'toutiao', 'zhihu']:
+                        targets.append(data.get('authorContentRootPojo'))
+                        
+                    # (C) 深度提取：转发者
+                    if platform == 'weibo':
+                        targets.append(data.get('authorCommentForwardPojo'))
+                    
+                    for user_data in targets:
                         if not user_data: continue
-                        uid = user_data.get('sjcjId')
+                        
+                        uid = user_data.get('sjcjId') or user_data.get('sjcjAuthorAccount')
                         if not uid: continue
                         uid = str(uid)
-                        if uid in extracted_users: continue
                         
-                        followers = user_data.get('sjcjFollowersCount', 0)
-                        posts = user_data.get('sjcjStatusesCount', 0)
-                        verified = user_data.get('sjcjVerified', False)
+                        dedup_key = (platform, uid)
+                        if dedup_key in seen_in_file: continue
                         
-                        user_dict = {
-                            'user_id': uid,
-                            'username': user_data.get('sjcjNickName', f'user_{uid}'),
-                            'display_name': user_data.get('sjcjNickName', ''),
-                            'gender': user_data.get('sjcjGender', 'unknown'),
-                            'verified': verified,
-                            'verified_type': user_data.get('sjcjVerifiedType', -1),
-                            'bio': user_data.get('sjcjDescription', ''),
-                            'followers_count': followers,
-                            'following_count': user_data.get('sjcjFriendsCount', 0),
-                            'posts_count': posts,
-                            'favorites_count': user_data.get('sjcjFavouritesCount', 0),
-                            'province': user_data.get('sjqxProvince', ''),
-                            'city': user_data.get('sjqxCity', ''),
-                            'location': user_data.get('sjcjLocation', ''),
-                            'ip_location': user_data.get('sjcjIpLocation', ''),
-                            'registration_time': user_data.get('sjcjRegistrationTime'),
-                            'last_published': user_data.get('sjqxLastPublished'),
-                            'source': user_data.get('sjqxSource', ''),
-                            'source_mobile': user_data.get('sjqxSourceMobileV2', ''),
-                            'profile_image_url': user_data.get('sjcjProfileImageUrl', ''),
-                            'user_type': u_type,
-                            'core_user': is_core_user_static(followers, verified)
-                        }
-                        extracted_users[uid] = user_dict
+                        # 3. 提取字段
+                        user_dict = {'platform': platform}
+                        for raw_field, clean_col in FIELD_MAPPING.items():
+                            if clean_col in schema:
+                                val = user_data.get(raw_field)
+                                
+                                # 数据清洗
+                                if clean_col == 'is_verified': 
+                                    val = safe_bool(val)
+                                elif clean_col == 'gender':
+                                    if val == 'n': val = 'unknown' 
+                                    elif val == 'm': val = 'male'
+                                    elif val == 'f': val = 'female'
+                                
+                                user_dict[clean_col] = val
+                        
+                        if 'user_id' not in user_dict: user_dict['user_id'] = uid
+                        
+                        # 4. 计算 Core User
+                        followers = int(user_dict.get('followers_count', 0) or 0)
+                        verified = user_dict.get('is_verified', False)
+                        is_core = verified or (followers > 10000) or (followers > 1000 and random.random() < 0.3)
+                        user_dict['is_core_user'] = is_core
+
+                        extracted_data.append((platform, user_dict))
+                        seen_in_file.add(dedup_key)
+                        
                 except Exception:
                     continue
-        return (filepath.name, list(extracted_users.values()))
+        return (filepath.name, extracted_data)
     except Exception as e:
         return (filepath.name, f"ERROR: {str(e)}")
 
@@ -100,96 +258,91 @@ class ParallelProcessor:
                 self.processed_files = {line.strip() for line in f if line.strip()}
 
     def _load_existing_ids(self):
-        if OUTPUT_PATH.exists():
-            print("⏳ Loading existing IDs...")
-            # 优化：只读取必要的列
-            df = pd.read_csv(OUTPUT_PATH, usecols=['user_id'], dtype={'user_id': str})
-            self.existing_ids = set(df['user_id'])
-            print(f"✅ Loaded {len(self.existing_ids)} IDs.")
+        if not OUTPUT_FOLDER.exists(): return
+        print("⏳ Loading existing IDs...")
+        for csv_file in OUTPUT_FOLDER.glob("*.csv"):
+            try:
+                platform = csv_file.stem.replace("user_profile_", "")
+                df = pd.read_csv(csv_file, usecols=['user_id'], dtype={'user_id': str})
+                for uid in df['user_id']:
+                    self.existing_ids.add(f"{platform}_{uid}")
+            except: pass
+        print(f"✅ Loaded {len(self.existing_ids)} users.")
 
     def run(self):
-        # 1. 收集未处理文件
-        files = [f for f in INPUT_FOLDER.glob('*.txt') if f.name not in self.processed_files]
+        OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+        files = [f for f in INPUT_FOLDER.glob('**/*.txt') if f.name not in self.processed_files]
+        
         if not files:
             print("No new files.")
             return
 
-        print(f"🚀 Processing {len(files)} files with {os.cpu_count()} cores...")
+        print(f"🚀 Processing {len(files)} files...")
+        pool = multiprocessing.Pool(processes=max(1, os.cpu_count() - 2))
         
-        pool = multiprocessing.Pool()
-        
-        total_new_users = 0
-        batch_buffer = []
-        
-        # [新增] 待处理文件列表：用于记录当前 batch_buffer 对应哪些文件
-        pending_files = [] 
-        
-        BATCH_SIZE = 1000
-        write_header = not OUTPUT_PATH.exists()
-        start_time = time.time()
+        batch_buffer = defaultdict(list)
+        pending_files = []
+        total_new = 0
         
         try:
             for filename, result in pool.imap_unordered(process_file_worker, files):
-                if isinstance(result, str) and result.startswith("ERROR"):
+                if isinstance(result, str):
                     print(f"❌ {filename}: {result}")
-                    # 出错的文件我们不记录到 log，这样下次还会重试
                     continue
                 
-                # 收集当前文件里的新用户
-                new_users_in_file = []
-                for user in result:
-                    uid = user['user_id']
-                    if uid not in self.existing_ids:
-                        self.existing_ids.add(uid)
-                        new_users_in_file.append(user)
+                for platform, user_dict in result:
+                    key = f"{platform}_{user_dict['user_id']}"
+                    if key not in self.existing_ids:
+                        self.existing_ids.add(key)
+                        batch_buffer[platform].append(user_dict)
                 
-                batch_buffer.extend(new_users_in_file)
-                
-                # [核心修改] 不要立即写日志，而是加入待处理列表
                 pending_files.append(filename)
                 
-                # 攒够一波数据，或者待确认的文件太多了，就执行写入
-                if len(batch_buffer) >= BATCH_SIZE or len(pending_files) >= 50:
-                    self._flush_data_and_logs(batch_buffer, pending_files, write_header)
-                    
-                    if batch_buffer: # 如果确实写入了数据，下次就不写 header 了
-                        write_header = False
-                    
-                    total_new_users += len(batch_buffer)
-                    print(f"⚡ Saved batch of {len(batch_buffer)}. Total new: {total_new_users}")
-                    
-                    # 清空缓冲区
-                    batch_buffer = []
+                current_size = sum(len(v) for v in batch_buffer.values())
+                if current_size >= 5000 or len(pending_files) >= 50:
+                    self._flush(batch_buffer, pending_files)
+                    total_new += current_size
+                    print(f"⚡ Saved {current_size} users. Total: {total_new}")
+                    batch_buffer = defaultdict(list)
                     pending_files = []
             
-            # 循环结束后，处理剩余的数据
-            if batch_buffer or pending_files:
-                self._flush_data_and_logs(batch_buffer, pending_files, write_header)
-                total_new_users += len(batch_buffer)
+            if any(batch_buffer.values()) or pending_files:
+                self._flush(batch_buffer, pending_files)
                 
         finally:
             pool.close()
             pool.join()
             
-        print(f"Done! Added {total_new_users} users in {time.time()-start_time:.2f}s")
+        print(f"✅ Done! Added {total_new} users.")
 
-    def _flush_data_and_logs(self, data_buffer, file_list, write_header):
-        """原子性操作：先存数据，再记日志"""
-        
-        # 1. 存数据 (如果有数据)
-        if data_buffer:
-            df = pd.DataFrame(data_buffer)
-            # 显式转换列类型，避免警告
-            if 'user_id' in df.columns:
-                df['user_id'] = df['user_id'].astype(str)
-                
-            df.to_csv(OUTPUT_PATH, mode='a', header=write_header, index=False, encoding='utf-8', escapechar='\\')
-        
-        # 2. 只有数据写入成功（没报错），才更新日志
-        if file_list:
-            with open(PROCESSED_FILES_LOG, 'a', encoding='utf-8') as f:
-                for fname in file_list:
-                    f.write(f"{fname}\n")
+    def _flush(self, buffer, files):
+        for platform, rows in buffer.items():
+            if not rows: continue
+            file_path = OUTPUT_FOLDER / f"user_profile_{platform}.csv"
+            
+            # [保持] 按指定顺序排序字段
+            valid_platform_cols = PLATFORM_SCHEMA.get(platform, PLATFORM_SCHEMA['weibo']).copy()
+            valid_platform_cols.update(['platform', 'is_core_user'])
+            
+            final_columns = [col for col in ORDERED_COLUMNS if col in valid_platform_cols]
+            
+            df = pd.DataFrame(rows)
+            # 容错：防止部分列缺失
+            cols_to_use = [c for c in final_columns if c in df.columns]
+            df = df[cols_to_use]
+
+            write_header = not file_path.exists()
+            df.to_csv(
+                file_path,
+                mode='a',
+                header=write_header,
+                index=False,
+                quoting=csv.QUOTE_MINIMAL,
+                escapechar='\\',
+            )
+            
+        with open(PROCESSED_FILES_LOG, 'a', encoding='utf-8') as f:
+            for name in files: f.write(name + '\n')
 
 if __name__ == "__main__":
     ParallelProcessor().run()

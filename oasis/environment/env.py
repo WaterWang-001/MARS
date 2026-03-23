@@ -131,12 +131,12 @@ class OasisEnv:
         
 
     async def _perform_llm_action(self, agent):
-        # ... (此方法不变) ...
+       
         async with self.llm_semaphore:
             return await agent.perform_action_by_llm()
 
     async def _perform_interview_action(self, agent, interview_prompt: str):
-        # ... (此方法不变) ...
+
         async with self.llm_semaphore:
             return await agent.perform_interview(interview_prompt)
 
@@ -150,7 +150,6 @@ class OasisEnv:
     ) -> None:
         r"""Update the recommendation system and perform the actions."""
         
-        # ... (step 内部的所有逻辑不变) ...
         
         await self.platform.update_rec_table()
         env_log.info("update rec table.")

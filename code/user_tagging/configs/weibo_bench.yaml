@@ -1,0 +1,42 @@
+platform_name: "weibo"
+platform: weibo
+task: benchmark
+
+data_source:
+  user_pool_filename: "{date}_bench_users.csv"
+
+
+fetch_limits:
+  max_count: 10
+
+buffer_rules:
+  trigger_threshold: 5
+  max_posts_per_call: 50
+
+quality_rules:
+  anchor_density:
+    lower_bound: 0.2
+    upper_bound: 1.0
+    min_unique_tags: 2  # 跨帖去重后至少 2 个不同 tag，确保兴趣多元性
+  behavior_risk:
+    min_personality_ratio: 0.1
+    min_avg_time_gap: 60
+    repetition_threshold: 0.20
+    fuzzy_repetition_threshold: 0.75
+    coherence:
+      low_threshold: 0.15
+      high_threshold: 0.85
+
+blacklist:
+  enable: true
+  sample_size: 500000
+  threshold_percent: 0.02
+  hashtag_pattern: "#([^#\\n]+)#"
+
+llm_service:
+  mode: remote
+  api_key: "${API_KEY}"
+  base_url: "http://localhost:8000/v1"
+  model_name: "deepseek-chat"
+  embedding_model_path: "MARS_result/model/embedding/BAAI/bge-small-zh-v1.5"
+  timeout: 120

@@ -1,18 +1,21 @@
 import asyncio
 import os
+import sys
 import logging
-import ast
-import random 
+import random
+import json
 from datetime import datetime
 from collections import defaultdict
+from pathlib import Path
 from typing import List, Set, Dict, Any, Iterable, Tuple, Optional
 import sqlite3
-import pandas as pd
-from tqdm import tqdm
-import numpy as np 
-from camel.models import ModelFactory
-from camel.types import ModelPlatformType, ModelType
-from camel.models import VLLMModel, DeepSeekModel
+
+# 优先使用本地 MARS/oasis 包而非 pip 安装的外部包
+_MARS_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _MARS_ROOT not in sys.path:
+    sys.path.insert(0, _MARS_ROOT)
+
+from camel.models import OpenAICompatibleModel
 
 # 引入新的 Annotator
 from attitude_annotator import OpenAIAttitudeAnnotator, VLLMAttitudeAnnotator
@@ -30,6 +33,29 @@ from intervention_processor import InterventionProcessor
 
 
 # --- 全局配置 ---
+BASE_DIR = Path(__file__).resolve().parent
+ENV_FILE_PATH = BASE_DIR / ".env"
+
+
+def _load_local_env(path: Path) -> dict[str, str]:
+    env_data: dict[str, str] = {}
+    if not path.exists():
+        return env_data
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        env_data[key] = value
+        os.environ.setdefault(key, value)
+    return env_data
+
+
+_LOCAL_ENV_CACHE = _load_local_env(ENV_FILE_PATH)
 
 # Tier 1: "重" LLM Agents (初始化慢, 运行慢)
 TIER_1_LLM_GROUPS = {
@@ -48,45 +74,85 @@ TIER_2_HEURISTIC_GROUPS = {
 CALIBRATION_END = "2025-06-02T16:30:00"
 TIME_STEP_MINUTES = 5
 
-# 模拟总步数
-TOTAL_STEPS = 10
+# 模拟总步数（支持通过环境变量覆盖）
+TOTAL_STEPS = int(os.getenv("MARS_TOTAL_STEPS", "2"))
+
+# 路径配置（可通过环境变量覆盖）
+DEFAULT_PROFILE_PATH = str(BASE_DIR / "oasis_agent_init.csv")
+DEFAULT_DB_PATH = str(BASE_DIR / "oasis_database.db")
+DEFAULT_INTERVENTION_FILE = str(BASE_DIR / "intervention_messages.csv")
+
+PROFILE_PATH = os.getenv("MARS_PROFILE_PATH", DEFAULT_PROFILE_PATH)
+DB_PATH = os.getenv("MARS_DB_PATH", DEFAULT_DB_PATH)
+INTERVENTION_FILE_PATH = os.getenv("MARS_INTERVENTION_PATH", DEFAULT_INTERVENTION_FILE)
+
+# 态度配置支持 Json 覆盖
+DEFAULT_ATTITUDE_CONFIG = {
+    'attitude_TNT': "Evaluate the user's sentiment towards TNT."
+}
+_attitude_config_override = os.getenv("MARS_ATTITUDE_CONFIG_JSON")
+if _attitude_config_override:
+    try:
+        ATTITUDE_CONFIG = json.loads(_attitude_config_override)
+        if not isinstance(ATTITUDE_CONFIG, dict):
+            ATTITUDE_CONFIG = DEFAULT_ATTITUDE_CONFIG
+    except json.JSONDecodeError:
+        ATTITUDE_CONFIG = DEFAULT_ATTITUDE_CONFIG
+else:
+    ATTITUDE_CONFIG = DEFAULT_ATTITUDE_CONFIG
+
+ATTITUDE_METRICS_LIST = list(ATTITUDE_CONFIG.keys())
+
+DEFAULT_MODEL_NAME = "gpt-4o-mini"
+MODEL_NAME = os.getenv("MARS_MODEL_NAME", DEFAULT_MODEL_NAME)
+MODEL_BASE_URL = os.getenv("MARS_MODEL_BASE_URL", "").strip()
+MODEL_API_KEY = os.getenv("MARS_MODEL_API_KEY", "").strip()
 
 
 
 async def main():
     # --- 1. 日志配置 ---
-    log_dir = "./log"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+    log_dir = BASE_DIR / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
     current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file_path = f"{log_dir}/oasis_test_{current_time}.log"
+    log_file_path = log_dir / f"oasis_test_{current_time}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(log_file_path, encoding="utf-8"),
+            logging.FileHandler(str(log_file_path), encoding="utf-8"),
             logging.StreamHandler()
         ]
     )
     logger = logging.getLogger(__name__)
-    logger.info(f"日志将保存到: {log_file_path}")
+    logger.info(f"日志将保存到: {str(log_file_path)}")
+
+    if not MODEL_BASE_URL or not MODEL_API_KEY:
+        logger.error("MARS_MODEL_BASE_URL 或 MARS_MODEL_API_KEY 未配置，请通过 .env 或控制台填写。")
+        raise RuntimeError("Missing OpenAI-compatible endpoint configuration")
 
     # --- 2. 模型初始化 ---
     logger.info("正在初始化 Agent 模型...")
-    model = VLLMModel(
-        model_type="model/qwen/Qwen2.5-7B-Instruct",
+    logger.info(f"OpenAICompatibleModel: {MODEL_NAME} @ {MODEL_BASE_URL}")
+    model = OpenAICompatibleModel(
+        model_type=MODEL_NAME,
         model_config_dict={
-            "temperature": 0.5
-        }
+            "temperature": 0.5,
+            "max_tokens": 8192
+        },
+        api_key=MODEL_API_KEY,
+        url=MODEL_BASE_URL 
     )
+    # model = VLLMModel(
+    #     model_type="model/qwen/Qwen2.5-7B-Instruct",
+    #     model_config_dict={
+    #         "temperature": 0.5
+    #     }
+    # )
 
     logger.info("Agent 模型初始化完毕。")
     
     # --- 3. Attitude 配置 ---
-    ATTITUDE_CONFIG = {
-        'attitude_TNT': "Evaluate the user's sentiment towards TNT."
-    }
-    ATTITUDE_METRICS_LIST = list(ATTITUDE_CONFIG.keys())
     logger.info(f"态度指标列表: {ATTITUDE_METRICS_LIST}")
 
     
@@ -112,10 +178,10 @@ async def main():
         ActionType.QUOTE_POST
     ]
 
-    profile_path = "oasis_test/oasis/oasis_agent_init_5000_random.csv" 
-    db_path = "oasis_test/oasis/oasis_database_5000_random.db" 
+    profile_path = PROFILE_PATH
+    db_path = DB_PATH
     # 干预文件路径
-    intervention_file_path = "oasis_test/oasis/intervention_messages.csv" 
+    intervention_file_path = INTERVENTION_FILE_PATH
   
     # --- 5. 数据库重置 ---
     logger.info("步骤 1: 正在重置数据库...")
@@ -124,7 +190,12 @@ async def main():
         'ground_truth_post', 
         'sqlite_sequence'
     ]
-    reset_simulation_tables(db_path, tables_to_keep, logger)
+    reset_simulation_tables(
+        db_path=db_path,
+        tables_to_keep=tables_to_keep,
+        logger=logger,
+        calibration_cutoff=CALIBRATION_END
+    )
 
     # --- 6. 环境创建 ---
     logger.info("步骤 2: 正在创建 Oasis 环境 (platform)...")
@@ -153,6 +224,8 @@ async def main():
     )
     logger.info(f"Agent 生成和注册完毕, 共 {len(agent_list)} 个 agents。")
     env.agent_graph = agent_list
+    print(f"已注册的 Agent ID 范围: {[agent.agent_id for agent in agent_list]}")
+    current_max_agent_id = max((getattr(agent, "agent_id_int", int(agent.agent_id)) for agent in agent_list), default=0)
 
   
     if os.path.exists(intervention_file_path):
@@ -210,12 +283,15 @@ async def main():
             model=model,
             available_actions=available_actions,
             attitude_metrics=ATTITUDE_METRICS_LIST,
-            agent_list=agent_list # 注意：函数内部会修改这个列表
+            agent_list=agent_list 
         )
         if new_agents:
             # 新注册的 Agent 必须在当前步运行以执行任务
             llm_agents_to_run.extend(new_agents)
-        total_active_pool = env.agent_graph.get_agents()
+        if isinstance(env.agent_graph, list):
+            total_active_pool = [(agent.agent_id, agent) for agent in env.agent_graph]
+        else:
+            total_active_pool = env.agent_graph.get_agents()
         
         for agent_id, agent in total_active_pool:
             group = agent.group

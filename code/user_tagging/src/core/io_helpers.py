@@ -1,6 +1,7 @@
 import pandas as pd
 import json
 import os
+import yaml
 from typing import Any
 
 def load_csv(file_path):
@@ -47,3 +48,16 @@ def append_jsonl(data: Any, file_path: str):
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"Failed to append JSONL: {e}")
+
+def load_config(config_path):
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+def load_processed_ids(log_path):
+    if not os.path.exists(log_path):
+        return set()
+    print(f"📜 Found resume log: {log_path}")
+    with open(log_path, 'r', encoding='utf-8') as f:
+        processed = set(line.strip() for line in f if line.strip())
+    print(f"   Loaded {len(processed)} previously processed IDs.")
+    return processed

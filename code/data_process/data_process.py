@@ -18,8 +18,7 @@ from MARS.code.data_process import user_profile      # 适配 ParallelProcessor
 from MARS.code.data_process import user_relationship # 适配 FastRelationshipPipeline
 
 # 导入处理类
-# 假设你已经把 UnifiedProcessor 的代码放入了 user_post.py
-from MARS.code.data_process.user_post import UnifiedProcessor
+from MARS.code.data_process.user_post import MultiDBProcessor
 from MARS.code.data_process.user_profile import ParallelProcessor
 from MARS.code.data_process.user_relationship import FastRelationshipPipeline as UserRelationshipPipeline
 
@@ -32,9 +31,9 @@ def make_default_paths(out_dir: Path):
     """生成默认输出路径配置"""
     out_dir = Path(out_dir)
     return {
-        # Post 相关 (UnifiedProcessor 直接输出最终 DB)
-        "db_path": str(out_dir / "user_post_database.db"),
-        "post_log_path": str(out_dir / "processed_posts.log"), # ETL 专用日志
+        # Post 相关 (MultiDBProcessor 输出多平台 DB)
+        "post_output_dir": str(out_dir),
+        "post_log_path": str(out_dir / "processed_post.log"),
         
         # Profile 相关
         "profiles_folder": str(out_dir), 
@@ -96,29 +95,18 @@ def unzip_and_flatten(input_dir: str, pattern: str = "*.zip", keep_original_zip:
 
 # --- 4. 核心任务函数 ---
 
-def run_posts(input_dir: str, db_path: str, log_path: str):
+def run_posts(input_dir: str, output_dir: str, log_path: str):
     print(f"\n[Task: Post (Unified ETL)] Start.")
     print(f"  -> Input: {input_dir}")
-    print(f"  -> DB Output: {db_path}")
+    print(f"  -> DB Output Dir: {output_dir}")
     
   
     
-    user_post.INPUT_DIRECTORY = Path(input_dir)  # 修改输入目录
-    
-    # 修改数据库路径 (兼容变量名可能的不同)
-    if hasattr(user_post, 'FINAL_DB_FILE'):
-        user_post.FINAL_DB_FILE = Path(db_path)
-        
-    # 修改日志路径
-    if hasattr(user_post, 'PROCESSED_LOG_FILE'):
-        user_post.PROCESSED_LOG_FILE = Path(log_path)
+    user_post.INPUT_DIRECTORY = Path(input_dir)
+    user_post.OUTPUT_DIR = Path(output_dir)
+    user_post.PROCESSED_LOG_FILE = Path(log_path)
 
-
-    proc = UnifiedProcessor(input_dir=input_dir, db_path=db_path)
-    
-    # 有些版本的 UnifiedProcessor 可能没有把 log_path 放在 init 里，
-    # 而是直接用的 PROCESSED_LOG_FILE 全局变量，所以上面的 Monkey Patch 很重要。
-    
+    proc = MultiDBProcessor(input_dir=input_dir, output_dir=output_dir)
     proc.run()
     print("[Task: Post] Done.")
 
@@ -164,9 +152,10 @@ def run_all(input_dir: str, out_dir: str):
     
     # 3. 顺序执行
     # 注意：UnifiedProcessor 不需要中间 Raw DB，它直接一步到位生成 Final DB
-    run_posts(input_dir, paths['db_path'], paths['post_log_path'])
-    
     run_profiles(input_dir, paths['profiles_out'], paths['profiles_folder'], paths['profiles_log'])
+    run_posts(input_dir, paths['post_output_dir'], paths['post_log_path'])
+    
+
     
     # run_relationships(input_dir, paths['matrix_out'], paths['scores_out'], paths['edges_temp_dir'])
     
@@ -183,8 +172,8 @@ def main():
     
     args = parser.parse_args()
 
-    input_dir = args.input or str(PROJECT_ROOT / "data" / "raw")
-    out_dir = args.out or str(PROJECT_ROOT / "MARS" / "output")
+    input_dir = args.input 
+    out_dir = args.out 
     paths = make_default_paths(Path(out_dir))
     
     try:
@@ -194,7 +183,7 @@ def main():
         elif args.mode == "posts":
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             unzip_and_flatten(input_dir) 
-            run_posts(input_dir, paths['db_path'], paths['post_log_path'])
+            run_posts(input_dir, paths['post_output_dir'], paths['post_log_path'])
             
         elif args.mode == "profiles":
             Path(out_dir).mkdir(parents=True, exist_ok=True)

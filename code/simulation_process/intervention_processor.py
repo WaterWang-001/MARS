@@ -3,9 +3,16 @@ import json
 import ast
 import random
 import sqlite3
+import sys
 import logging
 from collections import defaultdict
+from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+# 优先使用本地 MARS/oasis 包而非 pip 安装的外部包
+_MARS_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _MARS_ROOT not in sys.path:
+    sys.path.insert(0, _MARS_ROOT)
 
 from oasis.social_agent.agents_generator import create_and_register_single_agent
 
@@ -134,9 +141,10 @@ class InterventionProcessor:
                             target_agents = rng.sample(candidates, count)
 
                 for target in target_agents:
+                    target_numeric_id = target.agent_id_int if hasattr(target, "agent_id_int") else int(target.agent_id)
                     bribery_records.append((
                         time_step,
-                        target.agent_id,
+                        target_numeric_id,
                         content,
                         att_json_str, # 存标准 JSON
                         i_type
@@ -215,30 +223,53 @@ class InterventionProcessor:
         );
         """)
 
+    def _load_pending_registrations(self, cursor, current_step: int) -> List[Dict[str, Any]]:
+        cursor.execute(
+            """
+            SELECT id, user_profile, initial_attitude, instruction_content
+            FROM pending_registrations
+            WHERE time_step = ?
+            """,
+            (current_step,)
+        )
+        rows = cursor.fetchall()
+        registrations = []
+        for reg_id, profile_json, attitude_json, instruction in rows:
+            profile_data = self._parse_dict_field(profile_json) if profile_json else {}
+            attitude_data = self._parse_dict_field(attitude_json) if attitude_json else {}
+            registrations.append({
+                "db_id": reg_id,
+                "user_profile": profile_data,
+                "initial_attitude": attitude_data,
+                "instruction": instruction or ""
+            })
+        return registrations
+
+    def _clear_processed_registrations(self, cursor, processed_ids: List[int]):
+        if not processed_ids:
+            return
+        placeholders = ",".join(["?"] * len(processed_ids))
+        cursor.execute(
+            f"DELETE FROM pending_registrations WHERE id IN ({placeholders})",
+            processed_ids
+        )
+
     # 复用之前的动态注册逻辑 (保持不变)
     def execute_dynamic_registrations(self, env, current_step, current_max_agent_id, model, available_actions, attitude_metrics, agent_list):
-        # 1. 从 Platform 获取待注册数据 (Platform 读出的是标准 JSON 字符串)
-        new_registrations = env.platform.get_new_registrations(current_step)
-        
-        if not new_registrations:
-            return [], current_max_agent_id
-
-        logger.info(f"检测到 {len(new_registrations)} 个新 Agent 注册指令，开始处理...")
-        
-        new_agents_created = []
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        temp_max_id = current_max_agent_id
-
         try:
+            new_registrations = self._load_pending_registrations(cursor, current_step)
+            if not new_registrations:
+                return [], current_max_agent_id
+
+            logger.info(f"检测到 {len(new_registrations)} 个新 Agent 注册指令，开始处理...")
+            new_agents_created = []
+            temp_max_id = current_max_agent_id
+
             for reg_data in new_registrations:
                 temp_max_id += 1
                 new_agent_id = temp_max_id
-                
-                # reg_data['user_profile'] 已经是字典了 (Platform 里做了解析)
-                # 或者如果 Platform 返回的是字符串，这里需要解析。
-                # 让我们确认一下 Platform.get_new_registrations 的逻辑：
-                # 它里面有 json.loads。所以这里拿到的是字典。没问题。
                 
                 profile_data = reg_data['user_profile'].copy()
                 profile_data['user_id'] = str(new_agent_id)
@@ -289,10 +320,12 @@ class InterventionProcessor:
                 
                 logger.info(f"✅ 新 Agent {new_agent_id} ({new_agent.user_info.name}) 已上线并接受指令。")
 
+            processed_ids = [item["db_id"] for item in new_registrations]
+            self._clear_processed_registrations(cursor, processed_ids)
             conn.commit()
+            return new_agents_created, temp_max_id
         except Exception as e:
             logger.error(f"动态注册过程中发生错误: {e}", exc_info=True)
         finally:
             conn.close()
-            
-        return new_agents_created, temp_max_id
+        return [], current_max_agent_id

@@ -68,7 +68,7 @@ class SocialAgent(ChatAgent):
                  tools: Optional[List[Union[FunctionTool, Callable]]] = None,
                  single_iteration: bool = True,
                  interview_record: bool = False):
-        self.social_agent_id = agent_id
+    
         self.user_info = user_info
         self.channel = channel or Channel()
         self.env = SocialEnvironment(SocialAction(agent_id, self.channel))
@@ -103,11 +103,13 @@ class SocialAgent(ChatAgent):
                 ]
             ]
         all_tools = (tools or []) + (self.action_tools or [])
+        max_iteration = 1 if single_iteration else None
         super().__init__(system_message=system_message,
-                         model=model,
-                         scheduling_strategy='random_model',
-                         tools=all_tools,
-                         single_iteration=single_iteration)
+                 model=model,
+                 scheduling_strategy='random_model',
+                 tools=all_tools,
+                 max_iteration=max_iteration)
+        self.agent_id = agent_id
         self.interview_record = interview_record
         self.agent_graph = agent_graph
         self.test_prompt = (

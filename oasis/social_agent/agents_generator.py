@@ -86,6 +86,27 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         
     return df
 
+
+def _resolve_attitude_table_name(metric: str, existing_tables: set[str]) -> Optional[str]:
+    candidates: List[str] = []
+    base = metric
+    if base.startswith("log_"):
+        candidates.append(base)
+        base = base[4:]
+    else:
+        candidates.append(f"log_{base}")
+    candidates.append(base)
+    if base.startswith("attitude_"):
+        stripped = base[len("attitude_"):]
+        if stripped:
+            candidates.append(stripped)
+        if base == "attitude_average":
+            candidates.append("average")
+    for name in dict.fromkeys([c for c in candidates if c]):
+        if name in existing_tables:
+            return name
+    return None
+
 # --- [!! 修正: 查询 'post' 表 !!] ---
 def _load_initial_posts_from_db(db_path: str) -> dict[str, List[tuple[Optional[str], Optional[str]]]]:
     """
@@ -229,12 +250,7 @@ def _extract_attitude_score(data_source: Union[pd.Series, Dict], metric: str) ->
                 continue # 尝试下一个 key
     
     return 0.0
-# --- [!! 辅助函数结束 !!] ---
 
-
-# --- [!! 删除: `generate_agents`, `generate_agents_100w`, `generate_twitter_agent_graph` !!] ---
-# (已删除)
-# --- [!! 删除结束 !!] ---
 def create_and_register_single_agent(
     agent_id: int,
     user_profile: Dict[str, Any], # 包含 name, username, bio, group, attitudes
@@ -343,31 +359,29 @@ async def generate_and_register_agents(
     model: Optional[Union[BaseModelBackend, List[BaseModelBackend],
                           ModelManager]] = None,
     available_actions: list[ActionType] = None,
-    CALIBRATION_END: str = None, # 接收字符串
+    CALIBRATION_END: str = None, 
     TIME_STEP_MINUTES: int = 3,
     attitude_metrics: List[str] = None
 ) -> List[BaseAgent]:
     
     logger = logging.getLogger("agents_generator")
-    ATTITUDE_COLUMNS = [
-        'attitude_lifestyle_culture', 'attitude_sport_ent',
-        'attitude_sci_health', 'attitude_politics_econ'
-    ]
     if attitude_metrics is None:
         attitude_metrics = []
         logger.warning("⚠️ 未传入 attitude_metrics，Agent 将不包含态度初始值！")
+
     # 1. 预加载历史帖子
     initial_posts_map = _load_initial_posts_from_db(db_path)
     
     agent_list: List[BaseAgent] = []
     
-    # 2. 加载并拆分所有用户
+    # 2. 加载数据 (直接指定 user_id 为 int)
     logger.info(f"(Agent Gen) 正在从 {profile_path} 加载并清洗所有用户数据...")
     try:
-        all_user_info = pd.read_csv(profile_path, index_col=0, dtype={'user_id': str})
-        all_user_info = _clean_dataframe(all_user_info)
+        # 移除了 dtype={'user_id': str}，让 pandas 自动推断或强制为 int
+        all_user_info = pd.read_csv(profile_path, index_col=0) 
+        all_user_info['user_id'] = all_user_info['user_id'].astype(int)
     except (FileNotFoundError, pd.errors.EmptyDataError):
-        logger.error(f"❌ (Agent Gen) 找不到或用户文件 {profile_path} 为空。模拟无法启动。")
+        logger.error(f"❌ (Agent Gen) 找不到或用户文件 {profile_path} 为空。")
         return agent_list
     except KeyError as e:
         logger.error(f"❌ (Agent Gen) CSV 文件缺少必需的列: {e}")
@@ -376,268 +390,175 @@ async def generate_and_register_agents(
     tier1_info = all_user_info[all_user_info['group'].isin(TIER_1_LLM_GROUPS)]
     tier2_info = all_user_info[all_user_info['group'].isin(TIER_2_HEURISTIC_GROUPS)]
     
-    logger.info(f"(Agent Gen) 数据加载完毕: {len(tier1_info)} 个 [Tier 1 LLM], {len(tier2_info)} 个 [Tier 2 ABM]")
-    
-    # 3. 预计算关注图
+    # 3. 预计算关注图 (全部使用整数操作)
     logger.info("... (Agent Gen) 正在预计算关注图...")
     followings_map = defaultdict(set) 
     followers_map = defaultdict(set)
-    all_agent_ids_in_csv = set(all_user_info.index.astype(str)) 
+    all_agent_ids_set = set(all_user_info.index) # 索引即为 agent_id
 
-    for agent_id_str, row in all_user_info.iterrows():
-        agent_id_str = str(agent_id_str)
+    for agent_id, row in all_user_info.iterrows():
+        # _parse_follow_list 内部应确保返回整数列表
         followee_list = _parse_follow_list(row["following_agentid_list"])
         for followee_id in followee_list:
-            followee_id_str = str(followee_id)
-            if followee_id_str in all_agent_ids_in_csv:
-                followings_map[agent_id_str].add(followee_id_str)
-                followers_map[followee_id_str].add(agent_id_str)
-    logger.info(f"... (Agent Gen) 关注图构建完成。{len(followings_map)} 个用户有关注列表。")
+            followee_id = int(followee_id) # 强制确保是数字
+            if followee_id in all_agent_ids_set:
+                followings_map[agent_id].add(followee_id)
+                followers_map[followee_id].add(agent_id)
+    
+    # 4. 辅助函数：构建 Profile
+    def _build_dynamic_profile(row, metric_list):
+        avg_score = _extract_attitude_score(row, "attitude_avg")
+        other_info = {
+            "user_profile": row["user_char"],
+            "original_user_id": int(row["user_id"]),
+            "following_agentid_list": row["following_agentid_list"], 
+            "group": row["group"],
+            "initial_attitude_avg": avg_score
+        }
+        if metric_list:
+            for metric in metric_list:
+                other_info[metric] = _extract_attitude_score(row, metric)
+        return {"nodes": [], "edges": [], "other_info": other_info}
 
-    # 4. 准备批量数据库写入
+    # 5. 准备批量写入容器
     sign_up_list = []
     follow_list = []
     agent_id_to_type_map = {} 
     
-    def _build_dynamic_profile(row, metric_list):
-        """根据传入的 metric_list，从 CSV row 中提取 initial_{metric}"""
+    # --- 步骤 A: Heuristic Agents (Tier 2) ---
+    for agent_id, row in tqdm.tqdm(tier2_info.iterrows(), total=len(tier2_info), desc="Building Heuristic Agents"):
+        user_id = int(row["user_id"])
         
-        # 安全提取 average
-        avg_score = _extract_attitude_score(row, "attitude_avg")
-        
-        other_info = {
-            "user_profile": row["user_char"],
-            "original_user_id": row["user_id"],
-            "following_agentid_list_str": row["following_agentid_list"], 
-            "group": row["group"],
-            "initial_attitude_avg": avg_score
-        }
-        
-        # [!! 修正 !!] 安全提取各项指标
-        if metric_list:
-            for metric in metric_list:
-                val = _extract_attitude_score(row, metric)
-                other_info[metric] = val
-            
-        return {
-            "nodes": [], "edges": [], "other_info": other_info
-        }
-    # --- 5. 遍历并创建数据 (分两步) ---
-    
-    # 步骤 A: 遍历 Heuristic Agents (Tier 2)
-    logger.info(f"(Agent Gen) 正在为 {len(tier2_info)} 个 Heuristic Agents (Tier 2) 创建对象...")
-    for agent_id, row in tqdm.tqdm(tier2_info.iterrows(), total=len(tier2_info), desc="Building Heuristic Agents (Fast)"):
-        
-        agent_sim_id = int(agent_id)
-        agent_sim_id_str = str(agent_id)
-        
-        user_name = row["username"]
-        name = row["name"]
-        bio = row["description"]
-        user_id_str = row["user_id"]
-        group_name = row["group"]
-        
-        AgentClass = TIER_2_CLASS_MAP.get(group_name, TIER_2_CLASS_MAP["default"])
-
+        AgentClass = TIER_2_CLASS_MAP.get(row["group"], TIER_2_CLASS_MAP["default"])
         profile = _build_dynamic_profile(row, attitude_metrics)
+        
         user_info = UserInfo(
-            name=user_name, user_name=name, description=bio,
-            profile=profile, recsys_type='twitter',
+            name=row["username"], user_name=row["name"], 
+            description=row["description"], profile=profile, recsys_type='twitter',
         )
         
-        agent_env = SocialAction(
-            agent_id=agent_sim_id, 
-            channel=platform.channel
-        )
-       
         agent = AgentClass(
-                agent_id=agent_sim_id,
-                env=agent_env,
-                db_path=db_path,
-                user_info=user_info
-            )
-        # agent.group = group_name
+            agent_id=agent_id,
+            env=SocialAction(agent_id=agent_id, channel=platform.channel),
+            db_path=db_path,
+            user_info=user_info
+        )
         agent_list.append(agent)
         
-        # (准备 DB 写入)
-        num_followings = len(followings_map.get(agent_sim_id_str, set()))
-        num_followers = len(followers_map.get(agent_sim_id_str, set()))
+        # 准备数据
         sign_up_list.append((
-            user_id_str, agent_sim_id, user_name, name, bio, 
-            datetime.now(), num_followings, num_followers
+            user_id, agent_id, row["username"], row["name"], row["description"], 
+            datetime.now(), len(followings_map[agent_id]), len(followers_map[agent_id])
         ))
-        for follow_id_str in followings_map.get(agent_sim_id_str, set()):
-            follow_list.append((agent_sim_id, int(follow_id_str), datetime.now()))
+        for fid in followings_map[agent_id]:
+            follow_list.append((agent_id, fid, datetime.now()))
         
-        agent_id_to_type_map[agent_sim_id] = ('ABM', 'internal_state')
+        agent_id_to_type_map[str(agent_id)] = ('ABM', 'internal_state')
 
-            
-    # 步骤 B: 遍历 LLM Agents (Tier 1)
-    logger.info(f"(Agent Gen) 正在为 {len(tier1_info)} 个 LLM Agents (Tier 1) 创建对象...")
+    # --- 步骤 B: LLM Agents (Tier 1) ---
     for agent_id, row in tqdm.tqdm(tier1_info.iterrows(), total=len(tier1_info), desc="Building LLM Agents"):
-        agent_sim_id = int(agent_id)
+        user_id = int(row["user_id"])
         
-        # 将 row (Series) 转为 dict，并规范化字段名以匹配 create_single_agent 的要求
         profile_data = row.to_dict()
+        profile_data["user_id"] = user_id # 确保是数值
         
-        
-        # 实例化 (不进行 DB 写入，因为我们要批量写)
         agent = create_and_register_single_agent(
-            agent_id=agent_sim_id,
+            agent_id=agent_id,
             user_profile=profile_data,
             platform=platform,
             db_path=db_path,
             model=model,
             available_actions=available_actions,
-            current_time_step=0, # 初始化是 0
+            current_time_step=0,
             attitude_metrics=attitude_metrics,
-            is_dynamic_injection=False # 标记为 False，跳过单次 DB 写入
+            is_dynamic_injection=False 
         )
-        
         agent_list.append(agent)
 
-        posts_for_this_agent = initial_posts_map.get(user_id_str, [])
-        _preload_agent_memory(agent, posts_for_this_agent)
+        # 内存预加载
+        posts = initial_posts_map.get(user_id, [])
+        _preload_agent_memory(agent, posts)
         
-        # (准备 DB 写入)
-        num_followings = len(followings_map.get(agent_sim_id_str, set()))
-        num_followers = len(followers_map.get(agent_sim_id_str, set()))
         sign_up_list.append((
-            user_id_str, agent_sim_id, user_name, name, bio, 
-            datetime.now(), num_followings, num_followers
+            user_id, agent_id, row["username"], row["name"], row["description"], 
+            datetime.now(), len(followings_map[agent_id]), len(followers_map[agent_id])
         ))
-        for follow_id_str in followings_map.get(agent_sim_id_str, set()):
-            follow_list.append((agent_sim_id, int(follow_id_str), datetime.now()))
+        for fid in followings_map[agent_id]:
+            follow_list.append((agent_id, fid, datetime.now()))
 
-        agent_id_to_type_map[agent_sim_id] = ('LLM', 'external_expression')
+        agent_id_to_type_map[str(agent_id)] = ('LLM', 'external_expression')
 
-    logger.info(f"(Agent Gen) 成功创建 {len(agent_list)} 个 agent (T1+T2) 在内存中。")
-    
-    # --- 6. 批量写入数据库 (不变) ---
-    logger.info("... (Agent Gen) 正在批量注册用户到数据库 ...")
-    user_insert_query = (
-        f"INSERT OR IGNORE INTO user (user_id, agent_id, user_name, name, bio, "
-        f"created_at, num_followings, num_followers) VALUES "
-        f"(?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    platform.pl_utils._execute_many_db_command(user_insert_query,
-                                               sign_up_list,
-                                               commit=True)
-    logger.info(f"... (Agent Gen) 成功注册 {len(sign_up_list)} 个用户。")
+    # --- 6. 批量写入数据库 ---
+    logger.info(f"... (Agent Gen) 正在批量写入 {len(sign_up_list)} 个用户 ...")
+    user_sql = "INSERT OR IGNORE INTO user (user_id, agent_id, user_name, name, bio, created_at, num_followings, num_followers) VALUES (?,?,?,?,?,?,?,?)"
+    platform.pl_utils._execute_many_db_command(user_sql, sign_up_list, commit=True)
 
-    logger.info("... (Agent Gen) 正在批量注册关注关系到数据库 ...")
-    follow_insert_query = (
-        "INSERT OR IGNORE INTO follow (follower_id, followee_id, created_at) "
-        "VALUES (?, ?, ?)")
-    platform.pl_utils._execute_many_db_command(follow_insert_query,
-                                              follow_list,
-                                              commit=True)
-    logger.info(f"... (Agent Gen) 成功插入 {len(follow_list)} 条关注关系。")
+    follow_sql = "INSERT OR IGNORE INTO follow (follower_id, followee_id, created_at) VALUES (?, ?, ?)"
+    platform.pl_utils._execute_many_db_command(follow_sql, follow_list, commit=True)
 
-    # --- 7. [!! 修正: 注入 T<0 日志 !!] ---
+    # --- 7. T<0 日志处理 ---
     if CALIBRATION_END and attitude_metrics:
-        logger.info(f"... (Agent Gen) 准备计算 T<0 历史日志 (Metrics: {attitude_metrics})...")
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # 1. 【新增】Schema 检查：确认数据库中是否有这些列
-            # 获取 post 表的所有列名
-            cursor.execute("PRAGMA table_info(post)")
-            existing_columns = {row[1] for row in cursor.fetchall()}
-            
-            # 检查是否缺少必要的指标列
-            missing_metrics = [m for m in attitude_metrics if m not in existing_columns]
-            
-            # 检查是否缺少 attitude_annotated 标记列
-            is_annotated_column_missing = 'attitude_annotated' not in existing_columns
-
-            if missing_metrics or is_annotated_column_missing:
-                logger.warning(
-                    f"⚠️ (Agent Gen) 跳过 T<0 日志生成: 数据库 'post' 表缺少必要的列。"
-                    f"\n   - 缺失指标: {missing_metrics}"
-                    f"\n   - 缺失标记列: {'attitude_annotated' if is_annotated_column_missing else 'None'}"
-                    f"\n   (这通常意味着您跳过了 'OasisAttitudeProcessor' 的初始化步骤，这是正常的，但历史数据将不会有态度记录。)"
-                )
-                # 关闭连接并跳过后续逻辑，但不中断程序
-                cursor.close()
-                conn.close()
-            else:
-                # 2. 列存在，安全执行原来的逻辑
-                logger.info("... (Agent Gen) 数据库 Schema 校验通过，开始提取历史数据...")
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(post)")
+                cols = {r[1] for r in cursor.fetchall()}
                 
-                # 动态生成 SQL 列名
-                att_cols_sql = ", ".join([f"T1.{col}" for col in attitude_metrics])
-                
-                query = f"""
-                SELECT 
-                    T1.created_at, T1.user_id, T2.agent_id, {att_cols_sql}
-                FROM post AS T1 
-                INNER JOIN user AS T2 ON T1.user_id = T2.user_id
-                WHERE T1.created_at < ? AND T1.attitude_annotated = 1
-                """
-                
-                calibration_dt = datetime.fromisoformat(CALIBRATION_END)
-                df_history = pd.read_sql_query(
-                    query, conn, params=(calibration_dt.strftime("%Y-%m-%d %H:%M:%S"),)
-                )
-                
-                if not df_history.empty:
-                    # 计算 Time Step
-                    df_history['created_at_dt'] = pd.to_datetime(df_history['created_at'])
-                    delta_seconds = (calibration_dt - df_history['created_at_dt']).dt.total_seconds()
-                    time_step_col = -((delta_seconds // (TIME_STEP_MINUTES * 60)) + 1).astype(int)
-                    df_history['time_step'] = time_step_col
-                    
-                    # Group By
-                    df_grouped = df_history.groupby(['time_step', 'user_id', 'agent_id'])[attitude_metrics].mean().reset_index()
-                    
-                    # 映射类型
-                    df_grouped['agent_type_metric'] = df_grouped['agent_id'].map(agent_id_to_type_map)
-                    df_grouped = df_grouped.dropna(subset=['agent_type_metric'])
-                    df_grouped['agent_type'] = df_grouped['agent_type_metric'].apply(lambda x: x[0])
-                    df_grouped['metric_type'] = df_grouped['agent_type_metric'].apply(lambda x: x[1])
-
-                    # 插入日志
-                    all_dims_to_log = attitude_metrics + ['attitude_average']
-                    batch_insert_data = []
-                    
-                    for row in df_grouped.itertuples(index=False):
-                        # 动态获取所有指标的值
-                        scores_dict = {col: getattr(row, col) for col in attitude_metrics}
-                        valid_scores = [s for s in scores_dict.values() if s is not None]
-                        scores_dict['attitude_average'] = np.mean(valid_scores) if valid_scores else 0.0
-                        
-                        for dim_name in all_dims_to_log:
-                            table_name = f"log_{dim_name}"
-                            score = scores_dict.get(dim_name)
-                            if score is not None:
-                                batch_insert_data.append((
-                                    table_name, row.time_step, row.user_id, row.agent_id,
-                                    row.agent_type, row.metric_type, score
-                                ))
-                    
-                    # 执行 SQL 插入
-                    # cursor 已经在上面创建了，这里直接用
-                    for item in batch_insert_data:
-                        # item: (table, ts, uid, aid, atype, mtype, score)
-                        sql = f"INSERT INTO {item[0]} (time_step, user_id, agent_id, agent_type, metric_type, attitude_score) VALUES (?, ?, ?, ?, ?, ?)"
-                        cursor.execute(sql, item[1:])
-                    conn.commit()
-                    logger.info(f"... (Agent Gen) T<0 日志插入完成: {len(batch_insert_data)} 条")
+                if not set(attitude_metrics).issubset(cols) or 'attitude_annotated' not in cols:
+                    logger.warning("⚠️ 数据库缺少指标列，跳过历史日志计算。")
                 else:
-                    logger.info("... (Agent Gen) 没有找到符合条件的 T<0 历史数据。")
-                
-                cursor.close()
-                conn.close()
-                
+                    att_cols_sql = ", ".join([f"T1.{c}" for c in attitude_metrics])
+                    query = f"""
+                        SELECT T1.created_at, T1.user_id, T2.agent_id, {att_cols_sql}
+                        FROM post AS T1 
+                        INNER JOIN user AS T2 ON T1.user_id = T2.user_id
+                        WHERE T1.created_at < ? AND T1.attitude_annotated = 1
+                    """
+                    cal_dt = datetime.fromisoformat(CALIBRATION_END)
+                    df_hist = pd.read_sql_query(query, conn, params=(cal_dt.strftime("%Y-%m-%d %H:%M:%S"),))
+                    
+                    if not df_hist.empty:
+                        # 确保 ID 是整数以便映射
+                        df_hist['agent_id'] = df_hist['agent_id'].astype(int)
+                        
+                        # 计算 Time Step
+                        df_hist['dt'] = pd.to_datetime(df_hist['created_at'])
+                        df_hist['time_step'] = -(((cal_dt - df_hist['dt']).dt.total_seconds() // (TIME_STEP_MINUTES * 60)) + 1).astype(int)
+                        
+                        df_grp = df_hist.groupby(['time_step', 'user_id', 'agent_id'])[attitude_metrics].mean().reset_index()
+                        
+                        batch_log = []
+                        for r in df_grp.itertuples():
+                            key = str(r.agent_id) if r.agent_id is not None else None
+                            a_type, m_type = agent_id_to_type_map.get(key, (None, None))
+                            if not a_type: continue
+                            
+                            vals = [getattr(r, m) for m in attitude_metrics if getattr(r, m) is not None]
+                            avg_v = np.mean(vals) if vals else 0.0
+                            
+                            scores = {m: getattr(r, m) for m in attitude_metrics}
+                            scores['attitude_average'] = avg_v
+                            
+                            for dim, val in scores.items():
+                                if val is not None:
+                                    batch_log.append((r.time_step, r.user_id, r.agent_id, a_type, m_type, val, dim))
+                        
+                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                        existing_tables = {row[0] for row in cursor.fetchall()}
+
+                        # 按表名分发插入
+                        for ts, uid, aid, atype, mtype, score, dim in batch_log:
+                            table_name = _resolve_attitude_table_name(dim, existing_tables)
+                            if not table_name:
+                                continue
+                            cursor.execute(
+                                f"INSERT INTO {table_name} (time_step, user_id, agent_id, agent_type, metric_type, attitude_score) VALUES (?,?,?,?,?,?)",
+                                (ts, uid, aid, atype, mtype, score)
+                            )
+                        conn.commit()
+                        logger.info(f"成功插入 {len(batch_log)} 条 T<0 日志。")
         except Exception as e:
-            logger.error(f"❌ (Agent Gen) 处理 T<0 日志时发生错误: {e}")
-            # 确保连接关闭（如果在 try 块中初始化了 conn）
-            try:
-                conn.close()
-            except:
-                pass
+            logger.error(f"❌ T<0 日志处理失败: {e}")
     
     if attitude_metrics:
         logger.info(f"... (Agent Gen) 正在将所有 Agent 的初始态度 (Step 0) 写入对应指标表...")
@@ -672,8 +593,9 @@ async def generate_and_register_agents(
                 
                 uid = other_info.get("original_user_id")
                 aid = agent.agent_id
+                aid_int = agent.agent_id_int if hasattr(agent, "agent_id_int") else int(aid)
                 # 获取类型信息
-                atype, mtype = agent_id_to_type_map.get(aid, ("Unknown", "Unknown"))
+                atype, mtype = agent_id_to_type_map.get(str(aid), ("Unknown", "Unknown"))
                 
                 for metric in valid_tables:
                     val = 0.0
@@ -687,7 +609,7 @@ async def generate_and_register_agents(
                     
                     # 构造插入 Tuple: (time_step=0, user_id, agent_id, agent_type, metric_type, score)
                     insert_batches[table_name].append(
-                        (0, uid, aid, atype, mtype, float(val))
+                        (0, uid, aid_int, atype, mtype, float(val))
                     )
                     count_records += 1
             

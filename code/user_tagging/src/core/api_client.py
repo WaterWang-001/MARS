@@ -2,7 +2,9 @@ import json
 import re
 import os
 import time
-
+import logging
+import torch
+# 尝试导入必要的库
 try:
     import openai
     from openai import OpenAI, APITimeoutError, APIConnectionError
@@ -12,33 +14,69 @@ except ImportError:
     APITimeoutError = Exception
     APIConnectionError = Exception
 
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
+
 class APIClient:
-    def __init__(self, api_key: str, base_url: str, model_name: str, mode: str = "remote", timeout: float = 60.0):
+    def __init__(self, 
+                 api_key: str, 
+                 base_url: str, 
+                 model_name: str,
+                 embedding_model_path: str, 
+                 mode: str = "remote", 
+                 timeout: float = 60.0):
         """
-        :param api_key: API Key
-        :param base_url: API 地址
-        :param model_name: 模型名称 (vLLM 部署时的 serve name)
+        :param api_key: API Key (仅 Remote 模式需要)
+        :param base_url: API 地址 或 本地 LLM 路径
+        :param model_name: LLM 模型名称 (vLLM serve name)
+        :param embedding_model_path: 本地 BGE Embedding 模型路径
         :param mode: "remote" (vLLM/OpenAI) 或 "local" (Transformers)
-        :param timeout: 请求超时时间 (秒)
+        :param timeout: 请求超时时间
         """
         self.model_name = model_name
         self.mode = mode
-        self.timeout = float(timeout) # [修改] 接收并存储超时设置
+        self.timeout = float(timeout)
+        self.embedding_model_path = embedding_model_path
+
+        # ======================================================
+        # 1. 统一加载本地 Embedding 模型 (BGE)
+        # ======================================================
+        if SentenceTransformer is None:
+            raise ImportError("统一使用本地 BGE 模型需要安装: pip install sentence-transformers")
+
+        if not os.path.exists(self.embedding_model_path):
+            print(f"⚠️ Warning: 本地路径不存在: {self.embedding_model_path}，尝试从 HuggingFace Hub 下载...")
         
+        print(f"🔌 Loading Local Embedding Model: {self.embedding_model_path} ...")
+        try:
+            # 始终加载到 CPU，不仅速度足够快，还能为本地 LLM 腾出显存
+            # normalize_embeddings=True 确保输出向量已归一化，利于后续余弦相似度计算
+            self.local_embedder = SentenceTransformer(self.embedding_model_path,device="cpu")
+            print(f"✅ Embedding Model Loaded (CPU).")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load embedding model: {e}")
+
+        # ======================================================
+        # 2. 初始化 LLM 客户端 (根据 Mode)
+        # ======================================================
+        
+        # --- Remote Mode (vLLM / OpenAI) ---
         if self.mode == "remote":
             if openai is None:
-                raise ImportError("请安装 openai 包: pip install openai")
+                raise ImportError("Remote mode requires: pip install openai")
             
-            # 初始化 OpenAI 客户端
             self.client = OpenAI(
                 api_key=api_key, 
                 base_url=base_url,
-                max_retries=1  # 快速失败，不要在库内部死锁
+                max_retries=3
             )
-            print(f"✅ API Client Init: {base_url} | Model: {model_name} | Timeout: {self.timeout}s")
+            print(f"✅ LLM Client (Remote): {base_url} | Model: {model_name}")
             
+        # --- Local Mode (HuggingFace Transformers) ---
         elif self.mode == "local":
-            print(f"⏳ Loading Local Model: {base_url} ...")
+            print(f"⏳ Loading Local LLM: {base_url} ...")
             try:
                 import torch
                 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -52,34 +90,36 @@ class APIClient:
                 torch_dtype=torch.float16, 
                 trust_remote_code=True
             )
-            print("✅ Local Model Loaded.")
+            print("✅ Local LLM Loaded.")
+            
         else:
             raise ValueError("Mode must be 'remote' or 'local'")
 
-    def call_api(self, prompt: str) -> dict:
-        """
-        统一调用入口，异常由上层 Service 捕获
+    # ======================================================
+    #  Chat Completions (LLM)
+    # ======================================================
+
+    def call_api(self, prompt: str, temperature: float = 0.1) -> dict:
+        """统一 LLM 调用入口
+        :param prompt: 提示词内容
+        :param temperature: 采样温度（默认 0.1）。
         """
         try:
             if self.mode == "remote":
-                return self._call_remote_api(prompt)
+                return self._call_remote_api(prompt, temperature=temperature)
             else:
-                return self._call_local_model(prompt)
+                return self._call_local_model(prompt, temperature=temperature)
         except Exception as e:
-            # 打印日志并向上抛出，让 TaggingService 决定是重试还是记录 Error
-            # print(f"❌ Inference Error: {e}") 
+            # 可以在这里加重试逻辑或日志
             raise e 
 
-    def _call_remote_api(self, prompt: str) -> dict:
-        """调用兼容 OpenAI 格式的 API"""
-        
-        # 针对特定模型启用 JSON Mode (可选，Qwen 2.5 通常不需要强制 JSON Mode 也能遵循指令)
+    def _call_remote_api(self, prompt: str, temperature: float = 0.1) -> dict:
         use_json_mode = False
+        # 简单判断是否启用 JSON Mode
         if "deepseek" in self.model_name.lower() or "json" in self.model_name.lower(): 
             use_json_mode = True 
             
         messages = [
-            # [修改] 简化 System Prompt，因为业务 Prompt 里已经定义了详细的角色
             {"role": "system", "content": "You are a helpful assistant. Output strictly valid JSON."},
             {"role": "user", "content": prompt}
         ]
@@ -87,93 +127,95 @@ class APIClient:
         kwargs = {
             "model": self.model_name,
             "messages": messages,
-            "temperature": 0.1,
-            "timeout": self.timeout # [修改] 使用配置的超时时间
+            "temperature": float(temperature),
         }
         
         if use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
         try:
-            response = self.client.chat.completions.create(**kwargs)
+            # 将超时设置为调用级别（OpenAI Python SDK 支持 with_options）
+            client = self.client.with_options(timeout=self.timeout)
+            response = client.chat.completions.create(**kwargs)
             content = response.choices[0].message.content
             return self._parse_json(content)
-            
-        except APITimeoutError:
-            print(f"⚠️ [Timeout] Request timed out after {self.timeout}s.")
-            raise # 抛出，让外层捕获
-            
-        except APIConnectionError:
-            print(f"⚠️ [Connection] Failed to connect to vLLM/API.")
-            raise
-
         except Exception as e:
-            # Fallback: 如果模型不支持 JSON Mode 参数，回退到普通模式重试
+            # Fallback: 如果服务端报错不支持 response_format，则去掉参数重试
             if "response_format" in str(e) and use_json_mode:
-                # print(f"⚠️ JSON Mode not supported, retrying text mode...")
                 del kwargs["response_format"]
-                response = self.client.chat.completions.create(**kwargs)
+                client = self.client.with_options(timeout=self.timeout)
+                response = client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
                 return self._parse_json(content)
             raise e
 
-    def _call_local_model(self, prompt: str) -> dict:
-        """本地 Transformers 推理"""
+    def _call_local_model(self, prompt: str, temperature: float = 0.1) -> dict:
         messages = [
             {"role": "system", "content": "Output strictly valid JSON."},
             {"role": "user", "content": prompt}
         ]
-        
-        text = self.tokenizer.apply_chat_template(
-            messages, 
-            tokenize=False, 
-            add_generation_prompt=True
-        )
-        
+        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
 
         with torch.no_grad():
             generated_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=1024, 
-                temperature=0.1,
+                temperature=float(temperature),
                 do_sample=True 
             )
         
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        
+        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
         response_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         return self._parse_json(response_text)
 
-    def _parse_json(self, content: str) -> dict:
+    # ======================================================
+    #  Embeddings (Always Local BGE)
+    # ======================================================
+
+    def get_embeddings(self, texts: list) -> list:
         """
-        鲁棒的 JSON 解析器
+        获取文本向量。
+        统一使用本地加载的 BGE 模型。
         """
-        if not content:
-            return {}
+        if not texts:
+            return []
             
+        try:
+            # normalize_embeddings=True 对聚类（Cosine Similarity）至关重要
+            # convert_to_numpy=True 后转 list，便于 JSON 序列化
+            embeddings = self.local_embedder.encode(
+                texts, 
+                batch_size=32, 
+                normalize_embeddings=True, 
+                convert_to_numpy=True
+            )
+            return embeddings.tolist()
+            
+        except Exception as e:
+            print(f"❌ Local Embedding Error: {e}")
+            raise e
+
+    # ======================================================
+    #  Utils
+    # ======================================================
+
+    def _parse_json(self, content: str) -> dict:
+        if not content: return {}
         content = content.strip()
-        
-        # 去除 Markdown 代码块标记
+        # 移除 Markdown 代码块
         content = re.sub(r'^```json\s*', '', content, flags=re.IGNORECASE)
         content = re.sub(r'^```\s*', '', content)
         content = re.sub(r'\s*```$', '', content)
-        
-        # 尝试提取第一个 { ... } 块，防止 LLM 在 JSON 前后废话
         try:
             start = content.find('{')
             end = content.rfind('}')
             if start != -1 and end != -1:
                 content = content[start : end + 1]
-        except Exception:
-            pass
+        except Exception: pass
 
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            # 如果解析失败，返回空字典而不是由这里报错
-            # 这样 Service 层只会因为拿到空数据而做相应处理，不会 Crash
             print(f"⚠️ JSON Parse Error. Preview: {content[:50]}...")
             return {}

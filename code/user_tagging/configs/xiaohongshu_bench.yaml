@@ -1,0 +1,43 @@
+platform_name: "xiaohongshu"
+platform: xiaohongshu
+task: benchmark
+
+data_source:
+  user_pool_filename: "{date}_bench_users.csv"
+
+fetch_limits:
+  max_count: 15
+
+buffer_rules:
+  # 小红书高频用户多，攒够 5 条再画树更精准
+  trigger_threshold: 5
+  max_posts_per_call: 15
+
+quality_rules:
+  anchor_density:
+    lower_bound: 1.0  # 小红书天然带有话题，低于 0.5 往往是爬虫抓取的无效数据
+    upper_bound: 4.0  # 放宽上限：小红书单篇挂 5 个标签很正常
+    min_unique_tags: 2  # 跨帖去重后至少 5 个不同 tag，过滤反复刷同一话题的用户
+  user_profile:
+    min_bio_length: 5  # 小红书用户普遍有 bio，过滤无简介的低质/僵尸账号
+  behavior_risk:
+    min_personality_ratio: 0.15  # 要求较高的第一人称情绪浓度，确保是“真人种草”
+    min_avg_time_gap: 60
+    repetition_threshold: 0.20
+    fuzzy_repetition_threshold: 0.75
+    coherence:
+      low_threshold: 0.15
+      high_threshold: 0.85
+
+blacklist:
+  enable: false
+  sample_size: 500000
+  hashtag_pattern: "#([^\\s#]+)"
+
+llm_service:
+  mode: remote
+  api_key: "${API_KEY}"
+  base_url: "http://localhost:8000/v1"
+  model_name: "deepseek-chat"
+  embedding_model_path: "MARS_result/model/embedding/BAAI/bge-small-zh-v1.5"
+  timeout: 120

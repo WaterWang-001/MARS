@@ -1,12 +1,14 @@
 # This file contains the demographic prompt template for tagging users based on demographic information.
 
 **任务目标**
-基于给定的多源用户数据，推断用户的静态画像，包括年龄、性别、行业、职业、人生阶段和教育水平。
+基于给定的多源用户数据，推断或更新用户的静态画像，包括年龄、性别、行业、职业、人生阶段和教育水平。
+
+{prev_profile_block}
 
 **分析原则**
 1. 仔细分析每个数据类别，切勿遗漏，并严格遵循以下原则。
 2. **数据可靠性分析**：始终交叉检查并验证可信度，而不是直接采信。
-3. **避免先验假设**：例如，不要仅根据年龄就假设婚姻状况、子女情况或就业情况。
+3. **避免先验假设** 每个属性都应当尽量独立推断，仅参考关联的推断结果而不是完全置信。
 4. **特殊数据使用**：
    - “自填性别”是来自平台的高可靠元数据。优先考虑自填性别。
    - “注册时间”说明了账号的存在时长。
@@ -14,29 +16,78 @@
 
 **详细分析要求**
 
-1. **推断年龄和性别**
-    1.1 结合用户信息推断年龄和性别，参考**自填性别**来确定最终性别。
-    1.2 年龄区间：0-18, 18-23, 24-30, 31-40, 41-50, 50+。
-    1.3 性别分类：Male, Female。
+1. **推断性别 (Gender)**
+    1.1 结合用户信息推断，**优先采信**“自填性别”。
+    1.2 选项：
+        "男", "女"
 
-2. **推断行业和职业**
-    2.1 结合用户的用户名、简介和帖子内容来推断行业和职业。
-    2.2 **行业分类 (Industry)**：
-        "Agriculture and Fishery" (农林牧渔), "Manufacturing" (制造业), "Real Estate and Construction" (建筑与房地产), "Commerce and Retail" (商业与零售), "Transport and Logistics" (交通运输与物流), "High-Tech" (高科技), "Services" (服务业), "Finance" (金融), "Education and Training" (教育培训), "Healthcare" (医疗健康), "Media, Culture, Sports and Entertainment" (传媒文化体娱), "Government and Public Institutions" (政府与公共机构), "Not Employed" (未就业)。
-    2.3 **职业分类 (Occupation)**：
-        "Software" (软件/互联网), "Clerical Staff" (文员/行政), "Education and Trainer" (教育/培训师), "Beauty and Hairdressing" (美容美发), "Skilled Workers" (技术工人), "Government and Public Sector" (公务员/事业单位), "Transportation and Logistics" (交通物流人员), "Hospitality and Entertainment" (酒店/娱乐服务), "Media and Culture" (媒体文化工作者), "Independent Media" (自媒体), "Healthcare" (医护人员), "Agriculture and Fishery" (农林牧渔人员), "Finance and Insurance" (金融保险从业者), "Self-Employed" (个体经营者), "Domestic and Security" (家政安保), "Student" (学生), "High-Tech Hardware" (硬件工程师), "Retiree" (退休人员), "Homemaker" (家庭主妇/夫)。
+2. **推断年龄段 (Age Group)**
+    请从以下选项中选择： "0-18", "18-23", "24-30", "31-40", "41-50", "50+"
 
-3. **推断人生阶段**
-    3.1 结合用户信息进行推断，参考推断年龄和注册时间。
-    3.2 请从以下选项中选择：
-        "Single" (单身), "In Relationship" (恋爱中), "Pre-Marital" (备婚/订婚), "Married, No Children" (已婚未育), "Pre-Pregnancy and Pregnancy" (备孕/怀孕), "Parenting (Child 0–2)" (育儿期 0-2岁), "Parenting (Child 3-5)" (育儿期 3-5岁), "Parenting (Child 6-11)" (育儿期 6-11岁), "Parenting (Child 12-14)" (育儿期 12-14岁), "Parenting (Child 15-17)" (育儿期 15-17岁), "Parenting (Adult Child)" (育儿期-成年子女), "Parenting (Child Age Unknown)" (育儿期-子女年龄未知)。
+3. **推断教育水平 (Education Level)**
+    请从以下选项中选择：
+        "小学以下", 
+        "小学", 
+        "初中", 
+        "高中", 
+        "中专/职校/技校", 
+        "大专", 
+        "大学本科", 
+        "硕士", 
+        "博士或以上"
 
-4. **推断教育水平**
-    4.1 请从以下选项中选择：
-        "Junior High or Below" (初中及以下), "Senior High or Vocational" (高中/中专/职高), "Bachelor's or Associate" (本科/大专), "Postgraduate or Above" (研究生及以上)。
-5. **支撑证据与置信度评分**
-    5.1 对于每个属性，提供：逐步推理过程、使用的证据引用以及置信度等级。
-    5.2 置信度定义：
+4. **推断居住地类型**
+    请从以下选项中选择：
+        "直辖市市区", 
+        "省会城市市区", 
+        "地级市市区", 
+        "县/县级市城区", 
+        "县/县级市下面的镇", 
+        "农村"。
+
+5. **推断情感状态**
+    请从以下选项中选择："单身", "恋爱中", "已婚", "离婚", "丧偶", "其他"。
+
+6. **推断工作类型**
+    请从以下选项中选择：
+        "党政机关事业单位领导干部", 
+        "党政机关事业单位一般职员", 
+        "企业/公司高层管理人员", 
+        "企业/公司中层管理人员", 
+        "企业/公司一般职员", 
+        "专业技术人员（教师、医生、律师、工程师等）", 
+        "商业服务业人员", 
+        "个体工商户", 
+        "自由职业者", 
+        "工人（制造生产型企业、建筑业等）", 
+        "农业（农林牧渔）劳动者", 
+        "学生", 
+        "离退休", 
+        "失业", 
+        "无业", 
+        "二次求学", 
+        "其他"
+7. **推断个人收入**
+    7.1 基于推断出的“工作类型”所在的行业平均薪资，结合“居住地类型”的物价水平，以及帖子中体现的消费能力，推断个人收入。
+    7.2 选项：
+        "低（每月0-3499元）"
+        "中低（每月3500-7499元）"
+        "中（每月7500-12999元）"
+        "中高（每月13000-19999元）"
+        "高（每月20000元及以上）"
+
+8. **推断家庭收入**
+    8.1 基于“个人收入”以及推断出的“情感状态”推断家庭收入。如果是学生，参考其家庭提供的生活费水平或家庭资产暗示。
+    8.2 选项 (元/月)：
+        "低（每月0-6999元）"
+        "中低（每月7000-14999元）"
+        "中（每月15000-22999元）"
+        "中高（每月23000-29999元）"
+        "高（每月30000元及以上）"
+
+9. **支撑证据与置信度评分**
+    9.1 对于每个属性，提供：逐步推理过程、使用的证据引用以及置信度等级。
+    9.2 置信度定义：
         High: 清晰、强有力的证据；
         Medium-High: 有一定证据，加上逻辑推演；
         Medium: 无直接证据但有合理的间接线索；
@@ -46,12 +97,14 @@
 **输出格式**
 请严格按照以下JSON格式返回：
 {{
-  "age": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
   "gender": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
-  "industry": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
-  "occupation": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
-  "life_stage": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
-  "education_level": {{ "tag": "...", "confidence": "...", "evidence": "..." }}
+  "age": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
+  "education_level": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
+  "residence_type": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
+  "relationship_status": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
+  "job_type": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
+  "personal_income": {{ "tag": "...", "confidence": "...", "evidence": "..." }},
+  "family_income": {{ "tag": "...", "confidence": "...", "evidence": "..." }}
 }}
 
 **多源用户信息**

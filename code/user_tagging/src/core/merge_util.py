@@ -141,8 +141,8 @@ def merge_profiles(old_profile, new_profile):
     if not old_profile: return new_profile
     if not new_profile: return old_profile
 
-    # 定义两套字段集合，合并时统一处理
-    DEMO_KEYS = ["gender", "age", "location", "occupation", "life_stage", "consumption_level"]
+   
+    DEMO_KEYS = ["gender", "age", "education_level", "residence_type", "relationship_status", "job_type", "personal_income", "family_income"]
     FIRM_KEYS = ["industry", "sub_industry", "scale", "business_type", "service_scope", "location"]
     
     # 合并所有可能的 Key

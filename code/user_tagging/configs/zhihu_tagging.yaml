@@ -1,0 +1,44 @@
+platform_name: "zhihu"
+platform: zhihu
+task: tagging
+
+data_source:
+  user_pool_filename: "{date}_users.csv"
+
+fetch_limits:
+  max_count: 10
+
+buffer_rules:
+  trigger_threshold: 3
+  max_posts_per_call: 10
+
+quality_rules:
+  behavior_risk:
+    min_personality_ratio: 0.1
+    min_avg_time_gap: 300
+    repetition_threshold: 0.30
+    fuzzy_repetition_threshold: 0.85
+    coherence:
+      low_threshold: 0.30
+      high_threshold: 0.90
+
+sft_quality:
+  focus_threshold: 0.4
+  grounding_threshold: 0.2
+  confidence_ratio:
+    high: 0.7
+    mid: 0.2
+    na: 0.1
+  l1_overflow_ratio: 1.5
+
+blacklist:
+  enable: false
+
+llm_service:
+  mode: remote
+  api_key: "${API_KEY}"
+  base_url: "http://localhost:8000/v1"
+  model_name: "deepseek-chat"
+  embedding_model_path: "MARS_result/model/embedding/BAAI/bge-small-zh-v1.5"
+  max_workers: 10
+  timeout: 120

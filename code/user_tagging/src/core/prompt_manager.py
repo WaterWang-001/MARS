@@ -26,35 +26,74 @@ class PromptManager:
         
         self.logger.info(f"Loaded {len(self.templates)} templates: {list(self.templates.keys())}")
 
-    def get_interest_prompt(self, username, bio, posts, candidate_entities):
+    def get_interest_prompt(self, username, bio, posts, candidate_entities, prev_persona=""):
         """
-        生成兴趣标签提取 Prompt
+        生成兴趣标签提取 Prompt (流式模式：传入历史 persona 作为上下文先验)
         :param posts: 已经拼接好的帖子字符串
+        :param prev_persona: 上一批次的 persona_summary (Internal Memory State S_{n-1})
         """
         template = self.templates.get('interest_prompt')
         if not template:
             raise ValueError("Template 'interest_prompt' not found!")
-            
+
+        if prev_persona:
+            persona_block = f"""## 当前用户画像（基于历史观测积累的认知中枢 / Internal Memory State）
+{prev_persona}"""
+        else:
+            persona_block = """## 当前用户画像
+暂无历史观测，这是该用户的第一个活动批次。请从零开始构建画像。"""
+
         return template.format(
             username=username,
             bio=bio,
-            posts=posts,  
-            candidate_entities=candidate_entities
+            posts=posts,
+            candidate_entities=candidate_entities,
+            persona_block=persona_block
         )
 
-    def get_demographic_prompt(self, username, bio, gender, reg_time, location, verified_info, posts):
+    @staticmethod
+    def _build_profile_block(prev_profile: dict) -> str:
+        """构建历史人口学/机构画像上下文块，注入 prompt 作为先验"""
+        if not prev_profile:
+            return "## 历史画像\n暂无历史观测，这是该用户的第一个活动批次。请从零开始推断。"
+        # 过滤掉辅助字段，只保留属性槽
+        skip_keys = {"user_type", "is_org"}
+        lines = []
+        for key, node in prev_profile.items():
+            if key in skip_keys:
+                continue
+            if isinstance(node, dict):
+                val = node.get("tag") or node.get("value", "NA")
+                conf = node.get("confidence", "NA")
+                lines.append(f"- {key}: {val} (置信度: {conf})")
+            else:
+                lines.append(f"- {key}: {node}")
+        if not lines:
+            return "## 历史画像\n暂无历史观测，这是该用户的第一个活动批次。请从零开始推断。"
+        summary = "\n".join(lines)
+        return f"""## 历史画像（基于此前批次的推断结果）
+{summary}
+
+**更新原则**：若新证据的置信度高于历史值，则覆写；若新证据不足或置信度更低，则保留历史推断。"""
+
+    def get_demographic_prompt(self, username, bio, posts, gender_reported, reg_time, location_reported, verified_info, prev_profile=None):
         template = self.templates.get('demographic_prompt')
+        if not template:
+            self.logger.error("Template 'demographic_prompt' not found!")
+            return ""
+
         return template.format(
             username=username,
             bio=bio,
             posts_content=posts,
-            gender_reported=gender,
+            gender_reported=gender_reported,
             reg_time=reg_time,
-            location_reported=location,
-            verified_info=verified_info
+            location_reported=location_reported,
+            verified_info=verified_info,
+            prev_profile_block=self._build_profile_block(prev_profile)
         )
 
-    def get_firmographic_prompt(self, username, bio, verified_type, mapped_type_name, verified_info, posts):
+    def get_firmographic_prompt(self, username, bio, verified_type, mapped_type_name, verified_info, posts, prev_profile=None):
         template = self.templates.get('firmographic_prompt')
         return template.format(
             username=username,
@@ -62,5 +101,6 @@ class PromptManager:
             posts_content=posts,
             verified_type=verified_type,
             mapped_type_name=mapped_type_name,
-            verified_info=verified_info
+            verified_info=verified_info,
+            prev_profile_block=self._build_profile_block(prev_profile)
         )

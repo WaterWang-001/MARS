@@ -28,13 +28,19 @@ class AttitudeToolHandler:
             f"Example: {{'{keys[0] if keys else 'attitude_example'}': 0.5}}"
         )
 
-    def update_attitude_func(self, new_scores: Dict[str, float]) -> str:
+    def update_attitude_func(self, new_scores: Dict[str, float] | None = None, **direct_scores: float) -> str:
         """
         这是实际会被 LLM 调用的函数。
         它直接修改 agent 实例中的 attitude_scores 字典。
         """
         updated_keys = []
-        for k, v in new_scores.items():
+        merged_scores: Dict[str, float] = {}
+        if isinstance(new_scores, dict):
+            merged_scores.update(new_scores)
+        for k, v in direct_scores.items():
+            merged_scores[k] = v
+
+        for k, v in merged_scores.items():
             # 安全检查：只更新存在的 key，防止 LLM 幻觉创造新指标
             if k in self.agent.attitude_scores:
                 try:
@@ -55,8 +61,28 @@ class AttitudeToolHandler:
         """
         创建并返回 CAMEL FunctionTool 对象
         """
-        return FunctionTool(
-            self.update_attitude_func,
-            name=self.TOOL_NAME,
-            description=self._get_description()
-        )
+        openai_tool_schema = {
+            "type": "function",
+            "function": {
+                "name": self.TOOL_NAME,
+                "description": self._get_description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "new_scores": {
+                            "type": "object",
+                            "description": (
+                                "Mapping of attitude metric names to float scores between -1.0 and 1.0."
+                            ),
+                            "additionalProperties": {"type": "number"}
+                        }
+                    },
+                    "additionalProperties": {
+                        "type": "number",
+                        "description": "Optional shortcut: specify attitude dimensions directly without nesting inside new_scores."
+                    },
+                }
+            }
+        }
+
+        return FunctionTool(self.update_attitude_func, openai_tool_schema=openai_tool_schema)

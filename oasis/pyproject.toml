@@ -1,0 +1,38 @@
+[build-system]
+requires = [
+    "setuptools>=69",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oasis"
+version = "0.2.3"
+description = "Forked OASIS multi-agent social simulation framework"
+authors = [{ name = "OASIS Contributors" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "camel-ai>=0.1.0",
+    "igraph>=0.10",
+    "neo4j>=5.10",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "sentence-transformers>=2.2",
+    "torch>=2.0",
+    "tqdm>=4.65",
+    "transformers>=4.35",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["oasis*"]

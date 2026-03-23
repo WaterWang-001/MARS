@@ -30,18 +30,52 @@ from oasis.social_agent.agent_attitude import AttitudeToolHandler
 
 agent_log = logging.getLogger("social.agent")
 
+
+def _resolve_attitude_table_name(metric: str, existing_tables: set[str]) -> Optional[str]:
+    """Find the actual table name for a given attitude metric."""
+    candidates: List[str] = []
+    base = metric
+    if base.startswith("log_"):
+        candidates.append(base)
+        base = base[4:]
+    else:
+        candidates.append(f"log_{base}")
+    candidates.append(base)
+    if base.startswith("attitude_"):
+        stripped = base[len("attitude_"):]
+        if stripped:
+            candidates.append(stripped)
+        if base == "attitude_average":
+            candidates.append("average")
+    seen = set()
+    for name in candidates:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if name in existing_tables:
+            return name
+    return None
+
 # --- BaseAgent (状态管理与数据库写入 - 保持不变) ---
 class BaseAgent:
     def __init__(self, agent_id: int, user_info: UserInfo, channel: Channel | None = None, db_path: str | None = None, **kwargs):
-        self.agent_id = agent_id
+        self.agent_id = str(agent_id)
+        self._agent_id_int = int(agent_id)
         self.db_path = db_path
         self.user_info = user_info
         self.channel = channel or Channel()
-        self.env = SocialEnvironment(SocialAction(agent_id, self.channel))
+        action = SocialAction(self._agent_id_int, self.channel)
+        if db_path:
+            action.db_path = db_path
+        self.env = SocialEnvironment(action)
         self.group = user_info.profile["other_info"].get("group", "default")
         self.current_time_step = 0
         self.attitude_scores: Dict[str, float] = {}
         self._init_attitudes_from_profile()
+
+    @property
+    def agent_id_int(self) -> int:
+        return self._agent_id_int
 
     def _init_attitudes_from_profile(self):
         try:
@@ -63,19 +97,24 @@ class BaseAgent:
             original_user_id = self.user_info.profile["other_info"].get("original_user_id", str(self.agent_id))
             agent_type = "ABM" if isinstance(self, HeuristicAgent) else "LLM"
             metric_type = "internal_state" if agent_type == "ABM" else "external_expression"
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing_tables = {row[0] for row in cursor.fetchall()}
 
             for metric, score in self.attitude_scores.items():
-                table_name = f"log_{metric}"
-                cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
-                if not cursor.fetchone(): continue
-                
+                table_name = _resolve_attitude_table_name(metric, existing_tables)
+                if not table_name:
+                    continue
                 sql = f"INSERT INTO {table_name} (time_step, user_id, agent_id, agent_type, metric_type, attitude_score) VALUES (?, ?, ?, ?, ?, ?)"
-                cursor.execute(sql, (self.current_time_step, original_user_id, self.agent_id, agent_type, metric_type, score))
+                cursor.execute(sql, (self.current_time_step, original_user_id, self.agent_id_int, agent_type, metric_type, score))
             
             if self.attitude_scores:
                 avg_score = np.mean(list(self.attitude_scores.values()))
-                cursor.execute(f"INSERT INTO log_attitude_average (time_step, user_id, agent_id, agent_type, metric_type, attitude_score) VALUES (?, ?, ?, ?, ?, ?)", 
-                               (self.current_time_step, original_user_id, self.agent_id, agent_type, metric_type, avg_score))
+                avg_table = _resolve_attitude_table_name("attitude_average", existing_tables)
+                if avg_table:
+                    cursor.execute(
+                        f"INSERT INTO {avg_table} (time_step, user_id, agent_id, agent_type, metric_type, attitude_score) VALUES (?, ?, ?, ?, ?, ?)",
+                        (self.current_time_step, original_user_id, self.agent_id_int, agent_type, metric_type, avg_score),
+                    )
             conn.commit()
         except Exception as e:
             print(f"Error saving attitude for agent {self.agent_id}: {e}")
@@ -117,12 +156,19 @@ class SocialAgent(OriginalOasisAgent, BaseAgent):
         # - 传入 tools=[态度工具]：父类会将此列表与 action_tools 合并，注册给 LLM
         OriginalOasisAgent.__init__(
             self, 
-            agent_id=agent_id, 
+            agent_id=str(agent_id), 
             user_info=user_info, 
             available_actions=available_actions, 
             tools=[self.attitude_update_tool], 
             **kwargs
         )
+        if hasattr(self, 'env') and hasattr(self.env, 'action'):
+            self.env.action.agent_id = self.agent_id_int
+            if db_path:
+                self.env.action.db_path = db_path
+                self.env.db_path = db_path
+        if hasattr(self, "memory") and hasattr(self.memory, "agent_id"):
+            self.memory.agent_id = self.agent_id
         
         self.group = user_info.profile["other_info"].get("group", "default")
 
@@ -158,7 +204,7 @@ class SocialAgent(OriginalOasisAgent, BaseAgent):
         )
         
         try:
-            agent_log.info(f"Agent {self.social_agent_id} observing environment...")
+            agent_log.info(f"Agent {self.agent_id} observing environment...")
             
             # 2. 执行 LLM 调用 (CAMEL 会自动执行 Tool Calls)
             response = await self.astep(user_msg)
@@ -167,7 +213,7 @@ class SocialAgent(OriginalOasisAgent, BaseAgent):
             if response.info and 'tool_calls' in response.info:
                 for tool_call in response.info['tool_calls']:
                     # 这里的 tool_name 应该是 update_internal_attitude 或 create_post 等
-                    agent_log.info(f"Agent {self.social_agent_id} executed: {tool_call.tool_name}")
+                    agent_log.info(f"Agent {self.agent_id} executed: {tool_call.tool_name}")
 
             # 4. 写入当前态度到 DB (无论变没变)
             self.save_attitude_to_db()
@@ -175,7 +221,7 @@ class SocialAgent(OriginalOasisAgent, BaseAgent):
             return response
             
         except Exception as e:
-            agent_log.error(f"Agent {self.social_agent_id} step error: {e}")
+            agent_log.error(f"Agent {self.agent_id} step error: {e}")
             return e
 
 
@@ -224,16 +270,24 @@ class LurkerAgent(HeuristicAgent):
         try:
             unique_users = list(set(user_ids))
             if not unique_users: return []
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing_tables = {row[0] for row in cursor.fetchall()}
             user_vectors = {uid: {} for uid in unique_users}
             for metric in self.attitude_scores.keys():
-                table_name = f"log_{metric}"
-                placeholders = ','.join(f"'{uid}'" for uid in unique_users)
-                sql = f"SELECT user_id, attitude_score FROM {table_name} WHERE user_id IN ({placeholders}) GROUP BY user_id HAVING time_step = MAX(time_step)"
+                table_name = _resolve_attitude_table_name(metric, existing_tables)
+                if not table_name:
+                    continue
+                placeholders = ','.join('?' for _ in unique_users)
+                sql = (
+                    f"SELECT user_id, attitude_score FROM {table_name} "
+                    f"WHERE user_id IN ({placeholders}) GROUP BY user_id HAVING time_step = MAX(time_step)"
+                )
                 try:
-                    cursor.execute(sql)
+                    cursor.execute(sql, unique_users)
                     for row in cursor.fetchall():
                         user_vectors[row[0]][metric] = float(row[1])
-                except sqlite3.OperationalError: pass
+                except sqlite3.OperationalError:
+                    continue
             for uid in user_ids:
                 if uid in user_vectors and user_vectors[uid]:
                     attitude_vectors.append(user_vectors[uid])

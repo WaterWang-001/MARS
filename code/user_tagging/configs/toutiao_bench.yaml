@@ -1,0 +1,41 @@
+platform_name: "toutiao"
+platform: toutiao
+task: benchmark
+
+data_source:
+  user_pool_filename: "{date}_bench_users.csv"
+
+fetch_limits:
+  max_count: 10
+
+buffer_rules:
+  trigger_threshold: 3
+  max_posts_per_call: 50
+
+quality_rules:
+  anchor_density:
+    lower_bound: 0.2
+    upper_bound: 3.0
+    min_unique_tags: 2
+  behavior_risk:
+    min_personality_ratio: 0.05
+    min_avg_time_gap: 90
+    repetition_threshold: 0.20
+    fuzzy_repetition_threshold: 0.80
+    coherence:
+      low_threshold: 0.2
+      high_threshold: 0.9
+
+blacklist:
+  enable: false
+  sample_size: 300000
+  threshold_percent: 0.05
+  hashtag_pattern: "#([^\\s#]+)"
+
+llm_service:
+  mode: remote
+  api_key: "${API_KEY}"
+  base_url: "http://localhost:8000/v1"
+  model_name: "deepseek-chat"
+  embedding_model_path: "MARS_result/model/embedding/BAAI/bge-small-zh-v1.5"
+  timeout: 120
