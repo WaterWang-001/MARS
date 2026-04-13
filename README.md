@@ -9,9 +9,73 @@
   <br/><br/>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square" alt="License"/></a>
+  <a href="README_CN.md"><img src="https://img.shields.io/badge/lang-中文-red?style=flat-square" alt="中文"/></a>
 </p>
 
+---
 
+## :zap: Try It Now — Interactive Console
+
+MARS ships with a ready-to-use **service layer** at [`code/marketing_simulation/`](code/marketing_simulation/) so you can drive the full simulation pipeline without writing any Python. Two options:
+
+### Option 1 · Streamlit UI (zero-code, easiest)
+
+A visual console for designing interventions, picking attitude metrics, and running simulations with one click.
+
+```bash
+# 0. Install dependencies (one-time)
+conda create -n oasis python=3.11 -y && conda activate oasis
+pip install -e oasis
+pip install fastmcp streamlit pandas python-dotenv
+
+# 1. Set up your LLM credentials
+cp code/marketing_simulation/.env.example code/marketing_simulation/data/.env
+# edit data/.env and fill in MARS_MODEL_BASE_URL + MARS_MODEL_API_KEY
+
+# 2. Launch the console
+bash code/marketing_simulation/run.sh
+```
+
+Then open the URL Streamlit prints (usually `http://localhost:8501`) and use the **Simulation Console** tab to design interventions (broadcast / bribery / register_user), pick attitude dimensions, and hit **Run**.
+
+### Option 2 · Claude Desktop via MCP (conversational)
+
+Let Claude design and run marketing experiments for you end-to-end. MARS exposes **11 MCP tools** via a FastMCP server.
+
+1. **Install MARS** as shown above (steps 0 and 1).
+
+2. **Register the MCP server** in Claude Desktop config:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+   ```json
+   {
+     "mcpServers": {
+       "mars-marketing": {
+         "command": "/opt/anaconda3/envs/oasis/bin/python",
+         "args": ["/absolute/path/to/MARS/code/marketing_simulation/mcp_server.py"],
+         "env": {
+           "MARS_MODEL_BASE_URL": "https://api.openai.com/v1",
+           "MARS_MODEL_API_KEY": "sk-..."
+         }
+       }
+     }
+   }
+   ```
+
+3. **Restart Claude Desktop**, open a new chat, and paste the contents of [`code/marketing_simulation/skill.md`](code/marketing_simulation/skill.md) — this teaches Claude the strict 4-step experimental SOP (Data Ingestion → Configuration → Intervention Design → Simulation Execution).
+
+4. **Start experimenting**, e.g.:
+
+   > *"Import the sample user profiles at `code/marketing_simulation/data/oasis_agent_init.csv`, set up 5 simulation steps with an `attitude_brand` metric, broadcast a positive product announcement at step 2, then run the simulation and show me the final attitude distribution."*
+
+Claude will call `import_user_profiles` → `set_simulation_config` → `build_intervention_csv` → `run_marketing_simulation` → `query_db_table` in sequence, and return the analysis.
+
+> :bulb: For CLI smoke-testing the MCP stack without Claude Desktop, see `python code/marketing_simulation/my_client.py`.
+
+For full service-layer documentation (all 11 tools, environment variables, architecture), see [`code/marketing_simulation/README.md`](code/marketing_simulation/README.md).
+
+---
 
 ## :telescope: Overview
 
@@ -275,7 +339,13 @@ MARS/
 │   │   │   └── prompts/       #   LLM prompt templates
 │   │   └── configs/           #   Per-platform YAML configs
 │   ├── user_selection/        # Stage 3: User filtering + OASIS format conversion
-│   └── simulation_process/    # Stage 4: Attitude annotation + evaluation
+│   ├── simulation_process/    # Stage 4: Simulation, attitude annotation, evaluation
+│   └── marketing_simulation/  # Stage 5 (optional): Interactive console
+│       ├── mcp_server.py      #   FastMCP server exposing 11 tools to LLM agents
+│       ├── streamlit_app.py   #   Streamlit UI for intervention design & run
+│       ├── skill.md           #   Claude Code / Agent SOP for experiment orchestration
+│       ├── my_client.py       #   Python smoke-test client
+│       └── data/              #   Sample CSVs; runtime db/logs (gitignored)
 │
 └── oasis/                     # OASIS simulation engine (extended)
     ├── social_agent/          #   LLM-powered agent implementation
@@ -370,6 +440,29 @@ Orchestrates the simulation execution, intervention delivery, and post-simulatio
 - **Intervention system** (`intervention_processor.py`): Parses intervention CSV, supports group-based targeting with sampling ratios, deterministic seeding for reproducibility
 - **Attitude annotation** (`oasis_attitude.py`): LLM-based multi-dimensional attitude scoring (-1.0 to 1.0) with configurable dimensions; computes per-user initial and final attitude scores
 - **Evaluation metrics** (`oasis_evaluation_overall.py`): Bias (mean), Diversity (std), Pearson correlation — separated by LLM vs ABM agents, with temporal alignment to real timestamps
+
+### Stage 5 (Optional): Interactive Console (`code/marketing_simulation/`)
+
+An end-user **service layer** that lets non-developers drive the simulation
+pipeline without writing Python. It shares the same `oasis/` engine and the
+same `code/simulation_process/` pipeline — no duplicated source code.
+
+Three interchangeable entry points:
+
+| Mode | Command | Use case |
+|---|---|---|
+| **Streamlit UI** | `bash code/marketing_simulation/run.sh` | Interactive GUI with intervention editor and one-click run |
+| **Claude Desktop via MCP** | Configure `mcp_server.py` in `claude_desktop_config.json` and paste `skill.md` into chat | Let Claude design and run experiments conversationally |
+| **Python smoke test** | `python code/marketing_simulation/my_client.py` | Verify the full 4-step pipeline end-to-end from the CLI |
+
+The MCP server exposes 11 tools (`get_runtime_defaults`, `import_user_profiles`,
+`build_intervention_csv`, `run_marketing_simulation`, `query_db_table`, …)
+that Claude invokes by following the strict 4-step SOP defined in
+`code/marketing_simulation/skill.md`. Runtime artifacts (database, logs,
+generated intervention CSVs) are all written to
+`code/marketing_simulation/data/` and are gitignored.
+
+See [`code/marketing_simulation/README.md`](code/marketing_simulation/README.md) for full setup instructions.
 
 ---
 
