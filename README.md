@@ -1,9 +1,7 @@
-<h1 align="center">MARS</h1>
-<h3 align="center">Massive Agent-Based Real-World Simulation</h3>
+<h1 align="center">MARS：Massive Agent-Based Real-World Simulation</h1>
+
 
 <p align="center">
-  <b>Data-driven social digital twins powered by Large Language Models</b>
-  <br/><br/>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square" alt="License"/></a>
 </p>
